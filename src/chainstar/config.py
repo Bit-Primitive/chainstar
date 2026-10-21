@@ -136,10 +136,11 @@ CONFIG_TEMPLATE = """\
 # chainstar configuration. Command-line flags override anything set here.
 # https://github.com/Bit-Primitive/chainstar
 
-# Chain to read: ethereum or base.
+# Chain to read: ethereum, base, bitcoin or solana.
 chain: ethereum
 
 # Block range START:END. END is exclusive, so 20000000:20000100 is 100 blocks.
+# On Solana the range counts slots; skipped slots simply have no rows.
 # Uncomment and set, or pass --blocks on the command line.
 # blocks: "20000000:20000100"
 
@@ -150,7 +151,7 @@ chain: ethereum
 # The CHAINSTAR_TARGET environment variable overrides this value.
 target: duckdb:warehouse.duckdb
 
-# Where cryo's Parquet files are kept. Files already here are reused on re-runs.
+# Where Parquet files are kept. Files already here are reused on re-runs.
 data_dir: ./data
 
 # The RPC URL is never stored in this file, because hosted RPC URLs usually
@@ -160,7 +161,7 @@ rpc_url_env: CHAINSTAR_RPC_URL
 # Optional: cap requests per second sent to your RPC provider.
 # requests_per_second: 25
 
-# Optional: blocks per Parquet file (default 100). If your provider often fails
+# Optional: blocks (Solana: slots) per Parquet file (default 100). If your provider often fails
 # requests, smaller chunks let retries make progress.
 # chunk_size: 100
 """

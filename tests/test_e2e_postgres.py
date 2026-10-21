@@ -12,7 +12,7 @@ import pytest
 
 from chainstar.load import attach
 from chainstar.targets import parse_target
-from e2e_checks import check_star_schema, load_and_build
+from e2e_checks import ALL_CHAINS, check_all_chains, check_star_schema, load_and_build
 
 DSN = os.environ.get("CHAINSTAR_TEST_POSTGRES_DSN")
 
@@ -33,3 +33,6 @@ def test_build_star_schema_on_postgres(data_dir: Path, tmp_path: Path):
     load_and_build(target, data_dir, tmp_path / "dbt")
     load_and_build(target, data_dir, tmp_path / "dbt")
     check_star_schema(target)
+    # Then the other three chains into the same warehouse.
+    load_and_build(target, data_dir, tmp_path / "dbt", chains=ALL_CHAINS)
+    check_all_chains(target)

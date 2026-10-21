@@ -9,6 +9,7 @@ seeds:
         native_decimals: integer
     columns:
       - name: chain_id
-        data_tests: [unique, not_null]
+        description: EVM chain id. NULL for Bitcoin and Solana, which have none.
+        data_tests: [unique]
       - name: chain
         data_tests: [unique, not_null]

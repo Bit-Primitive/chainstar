@@ -3,7 +3,7 @@ with bounds as (
     select
         min(block_date) as first_date,
         max(block_date) as last_date
-    from {{ ref('stg_blocks') }}
+    from {{ ref('int_blocks') }}
 ),
 
 days as (

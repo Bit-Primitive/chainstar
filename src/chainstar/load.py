@@ -1,4 +1,4 @@
-"""The load stage: copy cryo's Parquet files into raw tables in the target warehouse.
+"""The load stage: copy extracted Parquet files into raw tables in the target warehouse.
 
 Both targets are written through DuckDB: a DuckDB file directly, and Postgres
 through DuckDB's postgres extension. One code path means the raw tables have the
@@ -7,6 +7,9 @@ same columns and types in either warehouse.
 Each run replaces the chain's rows with everything currently in its data
 directory. That makes loads idempotent, lets Ethereum and Base share tables, and
 lets ranges accumulate across runs. Overlapping ranges are de-duplicated here.
+
+EVM rows are told apart by chain id; Bitcoin and Solana rows, which have none,
+by chain name.
 """
 
 from collections.abc import Iterator
@@ -17,7 +20,7 @@ from pathlib import Path
 import duckdb
 
 from chainstar.chains import Chain
-from chainstar.datasets import ALL_DATASETS, Dataset, parquet_files
+from chainstar.datasets import ALL_DATASETS, Dataset, datasets_for, parquet_files
 from chainstar.targets import DuckDBTarget, PostgresTarget, Target
 
 RAW_SCHEMA = "chainstar_raw"
@@ -84,23 +87,40 @@ def load_raw(target: Target, data_dir: Path, chain: Chain) -> dict[str, int]:
         warehouse.connection.execute(
             f"CREATE SCHEMA IF NOT EXISTS {_ident(warehouse.catalog)}.{_ident(RAW_SCHEMA)}"
         )
+        # Every raw table exists after any load, so the dbt sources for chains not
+        # loaded yet resolve to empty tables.
         for dataset in ALL_DATASETS:
+            _create_table(warehouse, dataset)
+        for dataset in datasets_for(chain):
             files = parquet_files(data_dir, chain.name, dataset)
             counts[dataset.name] = _load_dataset(warehouse, dataset, files, chain)
     return counts
 
 
+def _create_table(warehouse: Warehouse, dataset: Dataset) -> None:
+    column_ddl = ", ".join(f"{_ident(name)} {sql_type}" for name, sql_type in dataset.columns)
+    warehouse.connection.execute(
+        f"CREATE TABLE IF NOT EXISTS {warehouse.table(RAW_SCHEMA, dataset.name)} ({column_ddl})"
+    )
+
+
+def _identity(chain: Chain) -> tuple[str, int | str]:
+    """The raw column and value that mark a row as belonging to `chain`."""
+    if chain.chain_id is not None:
+        return "chain_id", chain.chain_id
+    return "chain", chain.name
+
+
 def _load_dataset(warehouse: Warehouse, dataset: Dataset, files: list[Path], chain: Chain) -> int:
     connection = warehouse.connection
     table = warehouse.table(RAW_SCHEMA, dataset.name)
-    column_ddl = ", ".join(f"{_ident(name)} {sql_type}" for name, sql_type in dataset.columns)
-    connection.execute(f"CREATE TABLE IF NOT EXISTS {table} ({column_ddl})")
+    column, value = _identity(chain)
     if files:
-        _check_chain_id(connection, dataset, files, chain)
+        _check_identity(connection, dataset, files, chain)
 
     connection.execute("BEGIN TRANSACTION")
     try:
-        connection.execute(f"DELETE FROM {table} WHERE chain_id = ?", [chain.chain_id])
+        connection.execute(f"DELETE FROM {table} WHERE {_ident(column)} = ?", [value])
         if files:
             # Explicit casts pin the raw schema: if cryo ever changes a column,
             # the load fails loudly here instead of drifting downstream.
@@ -116,30 +136,33 @@ def _load_dataset(warehouse: Warehouse, dataset: Dataset, files: list[Path], cha
         connection.execute("ROLLBACK")
         raise
     row = connection.execute(
-        f"SELECT count(*) FROM {table} WHERE chain_id = ?", [chain.chain_id]
+        f"SELECT count(*) FROM {table} WHERE {_ident(column)} = ?", [value]
     ).fetchone()
     return int(row[0]) if row else 0
 
 
-def _check_chain_id(
+def _check_identity(
     connection: duckdb.DuckDBPyConnection, dataset: Dataset, files: list[Path], chain: Chain
 ) -> None:
     """Refuse to load files from a different chain than the directory claims.
 
-    That happens if a data directory is reused with the wrong RPC URL, and loading
-    it would label one chain's data as another's.
+    That happens if a data directory is reused with the wrong RPC URL, or files are
+    copied between chain directories, and loading them would label one chain's
+    data as another's.
     """
+    column, value = _identity(chain)
     found = {
         row[0]
         for row in connection.execute(
-            "SELECT DISTINCT chain_id FROM read_parquet(?)", [[str(f) for f in files]]
+            f"SELECT DISTINCT {_ident(column)} FROM read_parquet(?)", [[str(f) for f in files]]
         ).fetchall()
     }
-    unexpected = found - {chain.chain_id}
+    unexpected = found - {value}
     if unexpected:
+        label = "chain id(s)" if column == "chain_id" else "chain(s)"
         raise LoadError(
-            f"{dataset.name} files for {chain.name} contain chain id(s) "
-            f"{sorted(unexpected)}, expected {chain.chain_id}"
+            f"{dataset.name} files for {chain.name} contain {label} "
+            f"{sorted(unexpected)}, expected {value}"
         )
 
 

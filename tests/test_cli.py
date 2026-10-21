@@ -2,8 +2,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from chainstar import __version__
+from chainstar import __version__, cli
 from chainstar.cli import app
+from chainstar.rpc import NodeIdentity
 
 runner = CliRunner()
 
@@ -41,4 +42,55 @@ def test_run_rejects_unknown_chain(tmp_path: Path):
         ["run", "--config", str(tmp_path / "none.yml"), "--chain", "dogecoin", "--blocks", "1:2"],
     )
     assert result.exit_code == 1
-    assert "supported: ethereum, base" in result.output
+    assert "supported: ethereum, base, bitcoin, solana" in result.output
+
+
+def test_doctor_does_not_need_cryo_for_bitcoin(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(cli, "find_cryo", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "identify_node",
+        lambda chain, url: NodeIdentity(True, "chain main, height 972,467", "bitcoin (main)", 1),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--config",
+            str(tmp_path / "none.yml"),
+            "--chain",
+            "bitcoin",
+            "--rpc-url",
+            "https://btc.example/v1/secretkey",
+            "--target",
+            f"duckdb:{tmp_path / 'w.duckdb'}",
+        ],
+    )
+    assert "ok    cryo    not needed for bitcoin" in result.output
+    assert "chain main, height 972,467" in result.output
+    assert "secretkey" not in result.output
+
+
+def test_doctor_reports_the_wrong_network(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "identify_node",
+        lambda chain, url: NodeIdentity(False, "chain test, height 10", "bitcoin (main)", 10),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "doctor",
+            "--config",
+            str(tmp_path / "none.yml"),
+            "--chain",
+            "bitcoin",
+            "--rpc-url",
+            "https://x.example",
+        ],
+    )
+    assert result.exit_code == 1
+    assert (
+        "FAIL  rpc     https://x.example chain test, height 10; expected bitcoin (main)"
+        in result.output
+    )

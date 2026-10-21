@@ -9,7 +9,14 @@ from chainstar.datasets import ERC20_METADATA, parquet_files
 from chainstar.load import load_raw
 from chainstar.model import DBT_PROJECT_DIR, build_models
 from chainstar.targets import DuckDBTarget
-from e2e_checks import USDT, check_star_schema, fetch, load_and_build
+from e2e_checks import (
+    ALL_CHAINS,
+    USDT,
+    check_all_chains,
+    check_star_schema,
+    fetch,
+    load_and_build,
+)
 
 
 def test_build_star_schema_on_duckdb(data_dir: Path, tmp_path: Path):
@@ -75,6 +82,15 @@ def test_two_chains_share_one_warehouse(data_dir: Path, tmp_path: Path):
     load_raw(target, data_dir, get_chain("base"))
     assert build_models(target, tmp_path / "dbt").failures == []
     assert fetch(target, "SELECT count(*) FROM {schema}.fct_fees") == [(100,)]
+
+
+def test_four_chains_share_one_warehouse(data_dir: Path, tmp_path: Path):
+    target = DuckDBTarget(tmp_path / "warehouse.duckdb")
+    load_and_build(target, data_dir, tmp_path / "dbt", chains=ALL_CHAINS)
+    check_all_chains(target)
+    # Reloading one chain and rebuilding leaves the others as they were.
+    load_and_build(target, data_dir, tmp_path / "dbt", chains=("solana",))
+    check_all_chains(target)
 
 
 def test_relative_work_dir_stays_out_of_the_package(data_dir: Path, tmp_path: Path, monkeypatch):

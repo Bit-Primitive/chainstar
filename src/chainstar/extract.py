@@ -1,4 +1,4 @@
-"""The extract and decode stages: cryo pulls chain data into Parquet files.
+"""The extract and decode stages for EVM chains: cryo pulls chain data into Parquet files.
 
 extract: blocks, transactions and ERC-20 Transfer events for the block range.
          cryo decodes each Transfer log into token, from, to and value as it goes.
@@ -93,10 +93,12 @@ def decode_token_metadata(settings: RunSettings) -> MetadataResult:
     return MetadataResult(tokens_seen=len(seen), tokens_fetched=len(missing))
 
 
-def count_rows_in_range(files: Sequence[Path], start: int, end: int) -> int:
+def count_rows_in_range(
+    files: Sequence[Path], start: int, end: int, column: str = "block_number"
+) -> int:
     if not files:
         return 0
-    query = "SELECT count(*) FROM read_parquet(?) WHERE block_number >= ? AND block_number < ?"
+    query = f"SELECT count(*) FROM read_parquet(?) WHERE {column} >= ? AND {column} < ?"
     with duckdb.connect() as connection:
         row = connection.execute(query, [[str(f) for f in files], start, end]).fetchone()
     return int(row[0]) if row else 0

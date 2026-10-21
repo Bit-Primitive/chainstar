@@ -1,9 +1,19 @@
 sources:
   - name: chainstar_raw
-    description: Raw tables loaded by chainstar from cryo's Parquet output. Column names follow cryo.
+    description: >
+      Raw tables loaded by chainstar. EVM tables hold cryo's Parquet output with
+      cryo's column names; bitcoin_* and solana_* tables hold the output of
+      chainstar's own JSON-RPC extractors.
     schema: chainstar_raw
     tables:
       - name: blocks
       - name: transactions
       - name: erc20_transfers
       - name: erc20_metadata
+      - name: bitcoin_blocks
+      - name: bitcoin_transactions
+      - name: bitcoin_inputs
+      - name: bitcoin_outputs
+      - name: solana_blocks
+      - name: solana_transactions
+      - name: solana_transfers

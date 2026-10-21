@@ -5,7 +5,7 @@ import duckdb
 import pytest
 
 from chainstar.chains import get_chain
-from chainstar.datasets import BLOCKS, TRANSACTIONS, dataset_dir, parquet_files
+from chainstar.datasets import BLOCKS, SOLANA_BLOCKS, TRANSACTIONS, dataset_dir, parquet_files
 from chainstar.load import LoadError, attach, load_raw
 from chainstar.targets import DuckDBTarget, parse_target
 
@@ -74,3 +74,33 @@ def test_postgres_connection_error_hides_password():
         pass
     assert "hunter2" not in str(raised.value)
     assert "ana@127.0.0.1:1/dw" in str(raised.value)
+
+
+def test_json_rpc_chains_load_by_chain_name(data_dir: Path, tmp_path: Path):
+    target = DuckDBTarget(tmp_path / "w.duckdb")
+    assert load_raw(target, data_dir, get_chain("bitcoin")) == {
+        "bitcoin_blocks": 1,
+        "bitcoin_transactions": 6,
+        "bitcoin_inputs": 9,
+        "bitcoin_outputs": 13,
+    }
+    assert load_raw(target, data_dir, get_chain("solana")) == {
+        "solana_blocks": 2,
+        "solana_transactions": 12,
+        "solana_transfers": 20,
+    }
+    # Every raw table exists after any load, so dbt sources always resolve.
+    assert _raw_count(target.path, "erc20_transfers") == 0
+
+
+def test_refuses_another_chains_files_by_name(data_dir: Path, tmp_path: Path):
+    wrong = dataset_dir(data_dir, "solana", SOLANA_BLOCKS)
+    shutil.copy(parquet_files(data_dir, "solana", SOLANA_BLOCKS)[0], wrong / "copy.parquet")
+    with duckdb.connect() as connection:
+        connection.execute(
+            f"COPY (SELECT * REPLACE ('bitcoin' AS chain) FROM '{wrong / 'copy.parquet'}') "
+            f"TO '{wrong / 'mislabelled.parquet'}' (FORMAT parquet)"
+        )
+    (wrong / "copy.parquet").unlink()
+    with pytest.raises(LoadError, match="expected solana"):
+        load_raw(DuckDBTarget(tmp_path / "w.duckdb"), data_dir, get_chain("solana"))

@@ -9,7 +9,8 @@ import duckdb
 import typer
 
 from chainstar import __version__
-from chainstar.chains import SUPPORTED_CHAINS, UnknownChainError, get_chain
+from chainstar.chains import EVM, SUPPORTED_CHAINS, UnknownChainError, get_chain
+from chainstar.chunks import ExtractError
 from chainstar.config import (
     CONFIG_FILENAME,
     CONFIG_TEMPLATE,
@@ -25,7 +26,7 @@ from chainstar.load import LoadError, attach
 from chainstar.model import ModelError
 from chainstar.pipeline import PipelineError, run_pipeline
 from chainstar.redact import redact_url
-from chainstar.rpc import RpcError, get_chain_id, get_latest_block
+from chainstar.rpc import RpcError, identify_node
 from chainstar.targets import TARGET_HELP, DuckDBTarget, TargetError, parse_target
 
 app = typer.Typer(
@@ -59,6 +60,7 @@ USER_ERRORS = (
     TargetError,
     RpcError,
     CryoError,
+    ExtractError,
     LoadError,
     ModelError,
     PipelineError,
@@ -102,7 +104,7 @@ def doctor(
     rpc_url: RpcOption = None,
     target: TargetOption = None,
 ) -> None:
-    """Check that cryo, the RPC endpoint and the target warehouse are ready."""
+    """Check that cryo (EVM chains), the RPC endpoint and the target warehouse are ready."""
     problems = 0
 
     def report(ok: bool, name: str, detail: str) -> None:
@@ -116,12 +118,6 @@ def doctor(
         report(False, "config", str(error))
         raise typer.Exit(1) from None
 
-    executable = find_cryo()
-    if executable:
-        report(True, "cryo", f"{cryo_version()} at {executable}")
-    else:
-        report(False, "cryo", f"not found on PATH; {INSTALL_HINT}")
-
     expected_chain = None
     chain_name = chain or file_config.get("chain")
     if chain_name:
@@ -130,17 +126,21 @@ def doctor(
         except UnknownChainError as error:
             report(False, "chain", str(error))
 
+    executable = find_cryo()
+    if expected_chain and expected_chain.family != EVM:
+        report(True, "cryo", f"not needed for {expected_chain.name}")
+    elif executable:
+        report(True, "cryo", f"{cryo_version()} at {executable}")
+    else:
+        report(False, "cryo", f"not found on PATH; {INSTALL_HINT}")
+
     try:
         url = resolve_rpc_url(rpc_url, file_config)
-        chain_id = get_chain_id(url)
-        latest = get_latest_block(url)
-        detail = f"{redact_url(url)} chain id {chain_id}, latest block {latest:,}"
-        if expected_chain and chain_id != expected_chain.chain_id:
-            report(
-                False,
-                "rpc",
-                f"{detail}; expected {expected_chain.name} ({expected_chain.chain_id})",
-            )
+        # Without --chain, assume an EVM endpoint, as chainstar always has.
+        node = identify_node(expected_chain or SUPPORTED_CHAINS["ethereum"], url)
+        detail = f"{redact_url(url)} {node.detail}"
+        if expected_chain and not node.matches:
+            report(False, "rpc", f"{detail}; expected {node.expected}")
         else:
             report(True, "rpc", detail)
     except (ConfigError, RpcError) as error:
@@ -175,7 +175,7 @@ def run(
     chain: ChainOption = None,
     blocks: Annotated[
         str | None,
-        typer.Option(help="Block range START:END, END exclusive (as in cryo)."),
+        typer.Option(help="Block range START:END, END exclusive (as in cryo). Slots on Solana."),
     ] = None,
     rpc_url: RpcOption = None,
     target: TargetOption = None,
@@ -183,11 +183,13 @@ def run(
         Path | None, typer.Option(help="Where Parquet files are kept. Default ./data.")
     ] = None,
     requests_per_second: Annotated[
-        int | None, typer.Option(help="Cap on RPC requests per second sent by cryo.")
+        int | None, typer.Option(help="Cap on RPC requests per second sent to your RPC.")
     ] = None,
     chunk_size: Annotated[
         int | None,
-        typer.Option(help="Blocks per Parquet file. Default 100; lower it for flaky RPCs."),
+        typer.Option(
+            help="Blocks (Solana: slots) per Parquet file. Default 100; lower it for flaky RPCs."
+        ),
     ] = None,
 ) -> None:
     """Extract, decode, load and model a block range into star-schema tables."""

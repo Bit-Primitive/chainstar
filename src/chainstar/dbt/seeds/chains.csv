@@ -1,3 +1,5 @@
 chain_id,chain,native_symbol,native_decimals
 1,ethereum,ETH,18
 8453,base,ETH,18
+,bitcoin,BTC,8
+,solana,SOL,9

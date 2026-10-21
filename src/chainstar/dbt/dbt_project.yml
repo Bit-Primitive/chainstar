@@ -17,6 +17,10 @@ models:
     staging:
       +schema: staging
       +materialized: view
+    # Chain-specific staging rows reshaped to the columns all chains share.
+    intermediate:
+      +schema: staging
+      +materialized: view
     marts:
       +materialized: table
 

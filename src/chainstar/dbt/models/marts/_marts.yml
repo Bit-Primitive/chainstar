@@ -1,20 +1,25 @@
 models:
   - name: fct_transfers
-    description: One row per ERC-20 Transfer event in the loaded block ranges.
+    description: >
+      One row per value movement in the loaded ranges. EVM: an ERC-20 Transfer event.
+      Bitcoin: a transaction output (coinbase outputs included). Solana: a parsed SPL
+      token transfer or System Program SOL transfer instruction, top-level or inner,
+      of a successful transaction.
     columns:
       - name: transfer_id
-        description: "chain:transaction_hash:log_index"
+        description: "chain:transaction_hash:transfer_position"
         data_tests: [unique, not_null]
       - name: chain
         data_tests:
           - not_null
           - accepted_values:
               arguments:
-                values: ["ethereum", "base"]
+                values: ["ethereum", "base", "bitcoin", "solana"]
       - name: block_number
+        description: Block number; Bitcoin block height; Solana slot.
         data_tests: [not_null]
       - name: block_timestamp
-        description: Block time, UTC.
+        description: Block time, UTC. Bitcoin uses the header time; Solana the block's estimated production time.
         data_tests: [not_null]
       - name: date_day
         description: Block date, UTC. Joins to dim_dates.
@@ -25,12 +30,24 @@ models:
                 to: ref('dim_dates')
                 field: date_day
       - name: transaction_hash
+        description: Transaction hash; Bitcoin txid; Solana first signature.
         data_tests: [not_null]
       - name: transaction_index
-      - name: log_index
+        description: Position of the transaction in its block.
+      - name: transfer_position
+        description: >
+          Position of the transfer within its transaction: the log index (EVM), the
+          output index (Bitcoin), or the instruction position (Solana), "3" for the
+          fourth top-level instruction and "3.1" for its second inner instruction.
         data_tests: [not_null]
+      - name: log_index
+        description: EVM only; NULL for Bitcoin and Solana.
+        data_tests:
+          - not_null:
+              config:
+                where: "chain in ('ethereum', 'base')"
       - name: token_id
-        description: Joins to dim_tokens and dim_contracts.
+        description: Joins to dim_tokens. On EVM chains also to dim_contracts.
         data_tests:
           - not_null
           - relationships:
@@ -38,26 +55,46 @@ models:
                 to: ref('dim_tokens')
                 field: token_id
       - name: from_wallet_id
-        description: Sender. Joins to dim_wallets. The zero address means a mint.
+        description: >
+          Sender. Joins to dim_wallets. EVM: the zero address means a mint. Bitcoin:
+          set only when every input of the transaction came from one address, NULL
+          otherwise and for the coinbase.
         data_tests:
-          - not_null
+          - not_null:
+              config:
+                where: "chain <> 'bitcoin'"
           - relationships:
               arguments:
                 to: ref('dim_wallets')
                 field: wallet_id
       - name: to_wallet_id
-        description: Recipient. Joins to dim_wallets. The zero address means a burn.
+        description: >
+          Recipient. Joins to dim_wallets. EVM: the zero address means a burn.
+          Bitcoin: NULL for outputs without an address (see script_type).
         data_tests:
-          - not_null
+          - not_null:
+              config:
+                where: "chain <> 'bitcoin'"
           - relationships:
               arguments:
                 to: ref('dim_wallets')
                 field: wallet_id
       - name: token_address
+        description: ERC-20 contract, SPL mint, or 'native' for BTC and SOL.
       - name: from_address
+        description: For SPL tokens, the wallet that owns the sending token account.
       - name: to_address
+        description: For SPL tokens, the wallet that owns the receiving token account.
+      - name: input_address_count
+        description: Bitcoin only. Distinct addresses among the transaction's inputs; 0 for the coinbase.
+      - name: from_token_account
+        description: Solana SPL only. The token account debited.
+      - name: to_token_account
+        description: Solana SPL only. The token account credited.
+      - name: script_type
+        description: Bitcoin only. The output's script type as the node names it, e.g. witness_v0_keyhash, nulldata (OP_RETURN).
       - name: amount_raw
-        description: Exact transferred amount in the token's smallest unit, as a base-10 integer string.
+        description: Exact transferred amount in the asset's smallest unit (wei-scale token units, satoshis, lamports), as a base-10 integer string.
         data_tests: [not_null]
       - name: amount
         description: >
@@ -66,8 +103,10 @@ models:
 
   - name: fct_fees
     description: >
-      One row per transaction with the execution fee its sender paid
-      (gas_used x effective gas price). Excludes Ethereum blob fees and Base's L1 data fee.
+      One row per fee-paying transaction. EVM: execution fee (gas_used x effective gas
+      price), excluding Ethereum blob fees and Base's L1 data fee. Bitcoin: inputs minus
+      outputs; the coinbase is left out. Solana: meta.fee, including failed and vote
+      transactions.
     columns:
       - name: fee_id
         description: "chain:transaction_hash"
@@ -89,36 +128,59 @@ models:
         data_tests: [not_null]
       - name: transaction_index
       - name: payer_wallet_id
-        description: The transaction sender, who pays the fee. Joins to dim_wallets.
+        description: >
+          Who paid the fee. Joins to dim_wallets. EVM: the sender. Solana: the fee payer
+          (first account). Bitcoin: set only when one address funded the whole
+          transaction.
         data_tests:
-          - not_null
+          - not_null:
+              config:
+                where: "chain <> 'bitcoin'"
           - relationships:
               arguments:
                 to: ref('dim_wallets')
                 field: wallet_id
       - name: from_address
       - name: to_address
-        description: NULL for contract-creation transactions.
+        description: EVM only; NULL for contract creation, and for Bitcoin and Solana.
       - name: transaction_type
-        description: "EIP-2718 type: 0 legacy, 1 access list, 2 EIP-1559, 3 blob, 4 set-code; 126 is an OP-stack deposit on Base."
+        description: "EVM only. EIP-2718 type: 0 legacy, 1 access list, 2 EIP-1559, 3 blob, 4 set-code; 126 is an OP-stack deposit on Base."
       - name: success
+        description: Always true for Bitcoin, whose blocks hold only valid transactions.
+      - name: is_vote
+        description: Solana only. True for validator vote transactions.
       - name: gas_limit
+        description: EVM only.
       - name: gas_used
-        data_tests: [not_null]
+        description: EVM only.
+        data_tests:
+          - not_null:
+              config:
+                where: "chain in ('ethereum', 'base')"
       - name: effective_gas_price_wei
-        data_tests: [not_null]
+        description: EVM only.
+        data_tests:
+          - not_null:
+              config:
+                where: "chain in ('ethereum', 'base')"
       - name: base_fee_per_gas_wei
+        description: EVM only.
       - name: execution_fee_wei
-        description: gas_used x effective_gas_price_wei, exact.
+        description: EVM only. gas_used x effective_gas_price_wei, exact; equals fee_raw.
+      - name: fee_raw
+        description: The fee in the chain's smallest unit (wei, satoshis, lamports), exact.
         data_tests: [not_null]
       - name: native_symbol
+      - name: fee_native
+        description: fee_raw in whole native units (ETH, BTC, SOL), as double precision.
       - name: execution_fee_native
-        description: execution_fee_wei in whole native-token units (ETH), as double precision.
+        description: EVM only. execution_fee_wei in ETH, as double precision.
 
   - name: dim_wallets
     description: >
-      Every address that sent or received an ERC-20 transfer, or sent a transaction,
-      in the loaded data. Some are contracts; this release does not tell them apart.
+      Every address that sent or received a transfer, or paid for a transaction, in
+      the loaded data. Some are contracts or programs; this release does not tell
+      them apart.
     columns:
       - name: wallet_id
         description: "chain:address"
@@ -126,7 +188,7 @@ models:
       - name: chain
         data_tests: [not_null]
       - name: address
-        description: Lowercase 0x-prefixed hex.
+        description: EVM lowercase 0x hex; Bitcoin address as the node gives it; Solana base58 public key.
         data_tests: [not_null]
       - name: is_zero_address
       - name: first_seen_block
@@ -134,13 +196,16 @@ models:
       - name: last_seen_block
       - name: last_seen_at
       - name: transfers_out
+        description: Transfers sent. Bitcoin counts inputs spent from the address.
       - name: transfers_in
       - name: transactions_sent
+        description: Transactions paid for. Bitcoin counts transactions the address helped fund.
 
   - name: dim_tokens
     description: >
-      Every token contract that emitted an ERC-20 Transfer in the loaded data, with the
-      name, symbol and decimals cryo read from the contract at the chain head.
+      Every asset moved in the loaded data: ERC-20 contracts with the name, symbol and
+      decimals cryo read at the chain head; SPL mints with decimals from the
+      transactions; and BTC and SOL under the token address 'native'.
     columns:
       - name: token_id
         description: "chain:token_address"
@@ -151,22 +216,34 @@ models:
               arguments:
                 to: ref('dim_contracts')
                 field: contract_id
+              config:
+                where: "token_standard = 'erc20'"
       - name: chain
         data_tests: [not_null]
       - name: token_address
         data_tests: [not_null]
+      - name: token_standard
+        description: erc20, spl-token, spl-token-2022 or native.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["erc20", "spl-token", "spl-token-2022", "native"]
       - name: name
-        description: As returned by cryo 0.3.2, which strips spaces (e.g. "WrappedEther").
+        description: >
+          ERC-20 only, as returned by cryo 0.3.2, which strips spaces (e.g. "WrappedEther").
+          NULL for SPL mints and native assets.
       - name: symbol
+        description: ERC-20 symbol, or BTC / SOL for native assets. NULL for SPL mints.
       - name: decimals
       - name: metadata_block_number
-        description: Block at which name, symbol and decimals were read.
+        description: ERC-20 only. Block at which name, symbol and decimals were read.
       - name: has_metadata
-        description: False when the contract answered none of name(), symbol(), decimals().
+        description: False when none of name, symbol and decimals is known.
 
   - name: dim_contracts
     description: >
-      Contracts chainstar can identify. In this release: only token contracts that
+      Contracts chainstar can identify. In this release: only EVM token contracts that
       emitted ERC-20 Transfer events in the loaded data.
     columns:
       - name: contract_id
