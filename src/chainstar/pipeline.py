@@ -113,7 +113,9 @@ def run_pipeline(settings: RunSettings, echo: Echo, rpc_env: str = DEFAULT_RPC_E
         _describe_load(settings, echo)
 
         with _timed() as elapsed:
-            result = build_models(settings.target, settings.data_dir / ".dbt")
+            # A run loads every chunk on disk, which may include blocks below what the
+            # incremental tables already hold, so it always rebuilds them in full.
+            result = build_models(settings.target, settings.data_dir / ".dbt", full_refresh=True)
         if result.failures:
             echo("")
             for failure in result.failures:

@@ -79,7 +79,9 @@ def stub_stages(node, monkeypatch):
     node["value"] = NodeIdentity(True, "chain id 1, latest block 10,000", "ethereum (1)", 10_000)
     monkeypatch.setattr(pipeline, "_extract_evm", lambda settings, echo: None)
     monkeypatch.setattr(pipeline, "load_raw", lambda target, data_dir, chain: {"blocks": 40})
-    monkeypatch.setattr(pipeline, "build_models", lambda target, work_dir: ModelResult(models=1))
+    monkeypatch.setattr(
+        pipeline, "build_models", lambda target, work_dir, full_refresh: ModelResult(models=1)
+    )
     monkeypatch.setattr(
         pipeline, "table_row_counts", lambda target, schema, tables: dict.fromkeys(tables, 0)
     )

@@ -192,8 +192,10 @@ Every command has `--help` with examples. Add `--debug` before the command
 | --- | --- |
 | `chainstar quickstart` | Guided first run: asks for a chain and how many of the latest blocks, reads the range from the chain head, runs everything, and prints next steps. `--yes` for scripts. |
 | `chainstar run` | Runs extract, decode, load and model for a block range, then prints row counts. |
+| `chainstar sync` | Brings the warehouse up to date from where the last sync stopped, for one or more chains, up to the newest block with enough confirmations; detects and rolls back reorganisations; builds the star schema incrementally. Once, or `--every 5m` until stopped. See [Keeping a warehouse in sync](#keeping-a-warehouse-in-sync). |
+| `chainstar status` | Per synced chain: synced to, head, lag in blocks and time, last run, rows per table. `--json`; `--max-lag 15m` exits 1 when a chain is further behind. |
 | `chainstar export` | Saves a table, or the `transfers` view with token symbols, as CSV, Excel or Parquet, with optional filters. |
-| `chainstar wallet` | All token transfers sent or received by one address in a range, as a spreadsheet. |
+| `chainstar wallet` | All token transfers sent or received by one address in a range, as a spreadsheet. `--sync` keeps it current. |
 | `chainstar doctor` | Checks that cryo is installed (Ethereum and Base only), the RPC serves the expected chain (EVM chain id, Bitcoin network `main`, or Solana mainnet's genesis hash), the target is reachable, and dbt is installed. |
 | `chainstar init` | Writes a commented `chainstar.yml` you can edit. |
 
@@ -215,8 +217,8 @@ Command-line flags override environment variables, which override `chainstar.yml
 `chainstar quickstart` options: `--chain` (default `base`), `--recent N` (default 20, or
 1 on Bitcoin), `--rpc-url`, `--target` (default `duckdb:warehouse.duckdb`), `--data-dir`
 (default `./data`) and `--yes`. On Ethereum and Base the range ends 5 blocks behind the
-head, since chainstar does not handle reorganisations; on Bitcoin it is the latest
-block, and on Solana the latest finalized slots.
+head, since `quickstart` and `run` do not handle reorganisations (`sync` does); on
+Bitcoin it is the latest block, and on Solana the latest finalized slots.
 
 ### Re-running and adding ranges
 
@@ -241,8 +243,8 @@ load     chainstar_raw    4 tables, 18,844 rows                 0.1s
          (each run loads every chunk saved in data/ethereum, so earlier runs' blocks are included)
 ```
 
-To keep a range on its own, give it its own `--data-dir` and `--target`. dbt rebuilds
-the star-schema tables in full on each run.
+To keep a range on its own, give it its own `--data-dir` and `--target`. `run` rebuilds
+the star-schema tables in full each time; `chainstar sync` builds them incrementally.
 
 ### Public endpoints
 
@@ -368,6 +370,8 @@ tracker. Ctrl-C stops cleanly; finished chunks are kept.
 Hosted RPC URLs usually contain an API key, so chainstar:
 
 - never writes the URL to `chainstar.yml` (it refuses to read one that contains it);
+- reads one URL per chain from `CHAINSTAR_RPC_URL_<CHAIN>` (for example
+  `CHAINSTAR_RPC_URL_BASE`) when set, before `CHAINSTAR_RPC_URL`;
 - passes it to cryo through an environment variable, not the command line, and sends
   it nowhere but your endpoint for Bitcoin and Solana;
 - turns off cryo's report files;
@@ -375,6 +379,317 @@ Hosted RPC URLs usually contain an API key, so chainstar:
   also in `--debug` tracebacks.
 
 chainstar sends no telemetry, and turns off dbt's anonymous usage statistics.
+
+## Keeping a warehouse in sync
+
+`chainstar run` fetches a range you name. `chainstar sync` keeps a warehouse current:
+each time it runs, it continues from where the last sync stopped, up to the newest block
+that is safe to take, and exits; with `--every`, it keeps going until you stop it.
+
+### Your wallet, kept current
+
+```sh
+chainstar wallet 0xYourAddress --chain base --recent 1000 --sync
+```
+
+The first run fetches the latest 1,000 blocks and writes `base-0xyouraddress.xlsx`, as
+`chainstar wallet` always does. Run the same command again tomorrow or next month and it
+fetches only the blocks since then, and rewrites the spreadsheet; `--recent` matters only
+the first time. To have it update by itself while the terminal stays open, add
+`--every 1h`; Ctrl-C stops it. To run it on a schedule, see
+[Running it as a service](#running-it-as-a-service). Each wallet keeps its own folder and
+warehouse, as before, and costs the same per block as
+[`chainstar wallet`](#wallet-history).
+
+### A warehouse, kept current
+
+```sh
+chainstar sync --chain base --from-recent 1000      # first sync: the latest 1,000 blocks
+chainstar sync --chain base                         # later: continue where it stopped
+chainstar sync --chain ethereum --chain base --every 5m
+```
+
+A chain's first sync into a warehouse needs a starting point: `--from BLOCK`, or
+`--from-recent N` for the latest N blocks (Solana: slots). After that, every sync resumes
+from the warehouse's own record of its progress, so the same command works every time;
+`--from` and `--from-recent` are then ignored, with a note. Several chains are synced one
+after the other, and the star schema is built once at the end. Without `--chain`, sync
+takes the chains listed under `chains:` in `chainstar.yml`, or else every chain already
+synced into the target.
+
+Each chain needs an endpoint for that chain, so with several give each its own URL in
+`CHAINSTAR_RPC_URL_<CHAIN>`, for example `CHAINSTAR_RPC_URL_BASE` and
+`CHAINSTAR_RPC_URL_SOLANA`; chainstar uses it before `CHAINSTAR_RPC_URL`, and the public
+endpoint when neither is set. `--rpc-url` works for a single chain.
+
+A real first sync of Base on the public endpoint, 21 October 2026:
+
+```
+$ chainstar sync --chain base --from-recent 10
+2026-10-21T17:28:58Z all      start    chainstar 0.1.0.dev0; target duckdb:warehouse.duckdb; data data
+2026-10-21T17:28:58Z base     rpc      https://base-rpc.publicnode.com (free shared public endpoint)
+2026-10-21T17:28:58Z base     note     no RPC URL set, so chainstar uses a free shared public endpoint (5 requests/s, fine for trying small ranges); for more, use your own with --rpc-url or CHAINSTAR_RPC_URL
+2026-10-21T17:28:59Z base     head     chain id 8453, latest block 52,907,195; safe head 52,907,136 (60 confirmations)
+2026-10-21T17:30:53Z base     extract  52,907,127-52,907,136: erc20_transfers 6,509, blocks 10, transactions 2,133  9.1s
+2026-10-21T17:30:53Z base     decode   52,907,127-52,907,136: tokens 175, fetched 175  105.5s
+2026-10-21T17:30:54Z base     load     52,907,127-52,907,136: 8,827 raw rows; synced to 52,907,136  0.2s
+2026-10-21T17:31:02Z all      model    dbt build (full refresh: first sync or rollback of base): 23 models, 54 tests passed  8.2s
+```
+
+and, a few minutes later, the same command without `--from-recent` continues from the next block:
+
+```
+$ chainstar sync --chain base
+2026-10-21T17:31:49Z all      start    chainstar 0.1.0.dev0; target duckdb:warehouse.duckdb; data data
+2026-10-21T17:31:49Z base     rpc      https://base-rpc.publicnode.com (free shared public endpoint)
+2026-10-21T17:31:49Z base     note     no RPC URL set, so chainstar uses a free shared public endpoint (5 requests/s, fine for trying small ranges); for more, use your own with --rpc-url or CHAINSTAR_RPC_URL
+2026-10-21T17:31:49Z base     head     chain id 8453, latest block 52,907,281; safe head 52,907,222 (60 confirmations)
+2026-10-21T17:31:50Z base     check    block 52,907,136 still has hash 0x2e6f0107...c0b1bc; continuing from 52,907,137
+2026-10-21T17:37:07Z base     extract  52,907,137-52,907,222: erc20_transfers 26,352, blocks 86, transactions 18,783  70.0s
+2026-10-21T17:37:07Z base     decode   52,907,137-52,907,222: tokens 586, fetched 411  247.2s
+2026-10-21T17:37:07Z base     load     52,907,137-52,907,222: 45,807 raw rows; synced to 52,907,222  0.5s
+2026-10-21T17:37:14Z all      model    dbt build (incremental): 23 models, 54 tests passed  6.6s
+```
+
+`chainstar sync` options, besides `--target`, `--data-dir`, `--requests-per-second`,
+`--chunk-size` and `--config`, which work as for `run`:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--chain` | `chains` in `chainstar.yml`, else the chains already synced | Chain to sync; repeat for several |
+| `--from BLOCK` | | First sync only: start here (one chain at a time) |
+| `--from-recent N` | | First sync only: start N blocks before the safe head |
+| `--every DURATION` | run once | Keep running, syncing every `30s`, `5m`, `2h` or `1d` |
+| `--confirmations` | per chain, see below | Confirmations a block needs, or `finalized` (Ethereum, Base) |
+| `--full-refresh` | off | Rebuild the star-schema tables in full instead of incrementally |
+| `--json-logs` | off | One JSON object per log line |
+| `--rpc-url` | `CHAINSTAR_RPC_URL_<CHAIN>`, `CHAINSTAR_RPC_URL`, the public endpoint | For a single chain |
+
+What one sync does, per chain:
+
+1. **Head.** Asks the node for its latest block and works out the safe head (below).
+2. **Check.** Asks the chain for the hash of the last block it synced and compares it with
+   the one it stored. If they differ, see [Reorganisations](#reorganisations).
+3. **Extract and load**, in batches of ten chunks: 1,000 blocks with the default chunk
+   size, 100 on public endpoints, whose chunks are 10. Each batch is loaded in **one
+   transaction together with the progress it makes**, so a crash or a power cut never
+   leaves the warehouse claiming blocks it does not hold, or holding raw rows its record
+   does not cover. Only the batch's blocks are replaced in
+   the raw tables; nothing else is reloaded.
+4. **Model.** After all chains, dbt builds the star schema incrementally: each table
+   processes only rows it does not have yet (see [Incremental tables](#incremental-tables)).
+
+Stopping is safe at any point. The first Ctrl-C or SIGTERM (what `docker stop` and
+`systemctl stop` send) stops at the next safe point: between batches, or on Ethereum and
+Base between a batch's extraction and its token-metadata step, in which case that batch
+is not loaded and the next sync loads it, reusing the chunk files already saved. The dbt
+build is skipped too; the next sync does it. So stopping waits for at most one
+extraction stage, which on a public endpoint can take a minute or two. A second Ctrl-C
+or SIGTERM stops at once, which is also safe: chunk files appear only when complete, and
+an unfinished transaction is rolled back.
+
+### Can a sync keep up?
+
+Only if your endpoint answers faster than the chain makes blocks. Measured on the free
+public endpoints on 21 October 2026:
+
+- **Solana** makes about 2.5 blocks a second. At the public endpoint's 5 requests per
+  second, chainstar fetched 99 slots in 87.5 seconds, about 1.1 a second, so a sync
+  `--every` few minutes falls further behind each time. To follow Solana's head, use your
+  own RPC and raise `--requests-per-second`.
+- **Base** makes one block every 2 seconds. On the public endpoint 86 blocks took 70
+  seconds to extract, faster than the chain, plus 247 seconds reading names of 411 new
+  tokens; that second part shrinks as tokens repeat, because metadata is fetched once.
+- **Ethereum** makes one block every 12 seconds, well within the public endpoint's pace.
+- **Bitcoin** makes one block about every 10 minutes; one block takes seconds.
+
+`chainstar status` shows the lag; `--max-lag` turns a growing lag into a failing health
+check.
+
+### How far behind the head: confirmations
+
+A block's confirmations are the blocks built on top of it, plus one, so the newest block
+has one. Sync takes a block only once it has enough, so the short reorganisations every
+chain has never reach the warehouse:
+
+| Chain | Default | Behind the head | Why |
+| --- | --- | --- | --- |
+| Ethereum | 12 | 11 blocks, about 2.2 minutes | Well past the short reorganisations late blocks cause; a margin, not a guarantee. `--confirmations finalized` waits for the node's finalized block instead, which cannot be reverted without a third of all stake being slashed: 92 blocks (about 18 minutes) behind on 21 October 2026. |
+| Base | 60 | 59 blocks, about 2 minutes | Past the node's `safe` head, the newest block derived from data already posted to Ethereum, which was 38 blocks (76 seconds) behind on 21 October 2026. `finalized` (581 blocks, about 19 minutes behind that day) also waits for Ethereum to finalize that data. |
+| Bitcoin | 6 | 5 blocks, about 50 minutes | The long-standing convention: five blocks of work on top. Bitcoin has no finality, so there is no `finalized`. |
+| Solana | finalized | to the latest finalized slot | The latest finalized slot, which the cluster has rooted and cannot roll back; a number of confirmations does not apply. |
+
+Set them per chain in `chainstar.yml`, or with `--confirmations` for every chain in a
+command:
+
+```yaml
+confirmations:
+  ethereum: finalized
+  base: 120
+```
+
+### Reorganisations
+
+A reorganisation deeper than the confirmation depth is rare but possible, so before each
+sync chainstar checks that the last synced block still has the hash it had. If not, it:
+
+1. compares the blocks it stored, newest first, with the chain until one still matches
+   (blocks link to their parents by hash, so everything before a matching block is
+   unchanged); it checks at most 128 and otherwise stops and asks you to look;
+2. deletes everything after that block: its chunk files (whole files, so the rollback may
+   start a few blocks earlier), its raw rows, and its rows in `fct_transfers` and
+   `fct_fees`;
+3. syncs that range again from the chain as it is now, and rebuilds the star schema in
+   full so the dimensions are recounted.
+
+The log says what happened; from the tests' simulated reorganisation:
+
+```
+ethereum reorg    warning: block 26,239,739 now has hash 0xabababab...ababab, not 0x5f3cfd2d...77e8c1 as synced: the chain reorganised deeper than 1 confirmation
+ethereum rollback warning: rolled back from block 26,239,739: deleted 3 chunk files, 47 raw rows and 0 fact rows; syncing them again, then rebuilding the star schema in full
+```
+
+This is tested with a simulated reorganisation on DuckDB and Postgres: afterwards the
+tables equal a full rebuild from the new chain, and the block before the fork is
+untouched. Files are deleted before the database, so if the process stops half-way the
+hash check fails again next time and the rollback repeats.
+
+### Incremental tables
+
+The star-schema tables are dbt incremental models. Each keeps, per chain, the highest
+block it already holds, and a sync builds only rows above that: new transfers and fees
+are appended, and wallets, tokens and contracts seen again are updated (first seen kept,
+last seen and counts moved on). Both warehouses use dbt's `delete+insert` strategy on
+each table's unique key, which dbt-duckdb and dbt-postgres both support on every version
+chainstar allows (`merge` needs DuckDB 1.4 or Postgres 15). `dim_dates`, a few hundred
+rows a year, is rebuilt each time from a one-row-per-chain summary
+(`chainstar_staging.int_chain_coverage`) instead of from every block.
+
+The tables are rebuilt in full instead whenever older blocks may have changed: on a
+chain's first sync (a `run` may have loaded older blocks), after a rollback, with
+`--full-refresh`, and on every `chainstar run`, which therefore behaves as before. An
+incremental build after two syncs gives exactly the rows a full rebuild gives, on
+DuckDB and on Postgres, for all four chains; the tests check it table by table.
+
+On Postgres, sync also indexes the raw tables by chain and block, and the incremental
+tables by key and by chain and block, so a sync reads only its own blocks. DuckDB needs
+no indexes: it skips data by its min/max statistics.
+
+Two things a full rebuild would recompute but an incremental build leaves as they were:
+an ERC-20 token's name, symbol or decimals fetched again later (only if you delete
+`data/<chain>/erc20_metadata/`) reach older rows' `amount` only with `--full-refresh`;
+the same holds for a Solana mint whose decimals were unknown in its first transfers.
+
+### The progress record
+
+Sync keeps its progress in the warehouse, in `chainstar_state.sync_progress`, one row
+per chain, written in the same transaction as the data it describes:
+
+| Column | Meaning |
+| --- | --- |
+| `chain` | |
+| `first_block` | where the first sync started |
+| `last_block` | every block from `first_block` to here is loaded |
+| `checkpoint_block`, `checkpoint_hash`, `checkpoint_time` | the newest loaded block with a known hash (Solana: the last slot that had a block), checked before each sync |
+| `confirmations` | as used by the last sync |
+| `modelled_block` | the star schema includes raw data up to here |
+| `rebuild_pending` | the next build is a full rebuild (after a first sync or a rollback) |
+| `updated_at` | when progress was last recorded |
+| `last_run_at`, `last_run_status`, `last_error` | the last sync of the chain, `ok` or `error`, and why (RPC URLs redacted) |
+| `chainstar_version` | the version that last recorded progress |
+
+Times are UTC. Block numbers on Solana are slots.
+
+### Checking on it: chainstar status
+
+```
+$ chainstar status --max-lag 10m
+chainstar status: duckdb:warehouse.duckdb at 2026-10-21 17:37:16 UTC
+
+base
+  synced to    block 52,907,222, 2026-10-21 17:29:51 UTC (first synced block 52,907,127)
+  head         52,907,444; safe head 52,907,385 (60 confirmations)
+  lag          222 blocks, 7m 25s
+  last run     2026-10-21 17:37:07 UTC, ok
+  star schema  built to block 52,907,222
+  rows         fct_transfers 32,861, fct_fees 20,916, dim_wallets 19,673, dim_tokens 586, dim_contracts 586
+
+healthy: every chain is within 10m
+```
+
+`--json` prints the same as JSON for scripts. `--max-lag DURATION` makes it a health
+check: it exits with status 1 when any chain's newest synced block is older than that.
+The lag in time is measured from that block's own time, so it works without the node and
+includes the confirmation depth: about 2 minutes on Base, an hour on Bitcoin. Allow for
+that and for the sync interval, for example `--max-lag 15m` for Base synced every 5
+minutes, and `--chain bitcoin --max-lag 3h`. The lag in blocks needs the node; when it
+cannot be reached, status says so and still reports the rest.
+
+### Running it as a service
+
+Ready-to-use files are in [`examples/`](examples/):
+
+- **cron** ([`examples/cron/crontab`](examples/cron/crontab)): `chainstar sync` every 5
+  minutes. Runs never overlap: a sync refuses to start while another uses the same data
+  folder.
+- **systemd** ([`examples/systemd/`](examples/systemd/)): a service that runs one sync,
+  and a timer that starts it 5 minutes after the previous run finished. Logs go to the
+  journal (`journalctl -u chainstar-sync`).
+- **Docker**, one container that keeps syncing:
+
+  ```sh
+  docker run -d --name chainstar-sync --restart unless-stopped --stop-timeout 180 \
+    -v "$PWD:/work" -e CHAINSTAR_RPC_URL_BASE \
+    ghcr.io/bit-primitive/chainstar sync --chain base --from-recent 100 --every 5m
+  docker logs -f chainstar-sync
+  docker exec chainstar-sync chainstar status
+  ```
+
+  `--stop-timeout` gives the current extraction stage time to finish on `docker stop`
+  (the default is 10 seconds, after which Docker kills it, which is safe but wastes the
+  stage's work).
+- **Docker Compose with Postgres** ([`examples/docker-compose.yml`](examples/docker-compose.yml)):
+  Postgres plus a sync container every 5 minutes, with `chainstar status --max-lag 15m`
+  as its health check. `docker compose up -d` in that folder; put a password and RPC URLs
+  in a `.env` file next to it.
+
+Run the first sync by hand, or keep `--from-recent` in the command as the Docker examples
+do: it applies only until the first sync has happened.
+
+### Logs
+
+One line per step, with the block range, row counts and time taken:
+
+```
+2026-10-21T17:30:53Z base     extract  52,907,127-52,907,136: erc20_transfers 6,509, blocks 10, transactions 2,133  9.1s
+```
+
+Steps: `head`, `check`, `extract`, `decode`, `load`, `model`, `export` (wallets),
+`reorg`, `rollback`, `wait`, `stop`. Warnings and errors say so after the step name. With
+`--json-logs` each line is a JSON object with `time`, `level`, `chain`, `stage`,
+`message`, `seconds` where timed, and the step's numbers (`first_block`, `last_block`,
+`rows`, `head`, `safe_head`, ...), for log shippers. RPC URLs are redacted in both.
+
+### Good to know
+
+- **One sync per data folder.** A second one refuses to start. Do not point syncs with
+  different data folders, or on different machines, at the same warehouse and chain.
+- **`sync` and `run` on the same chain and warehouse** work together when they share a
+  data folder: `run` reloads every chunk on disk and rebuilds in full. With different
+  data folders, `run` would replace the rows sync recorded; keep them apart.
+- **Errors do not stop the others.** A chain that fails (node down, rate limited) is
+  logged and recorded in `last_error`; the other chains are synced, the exit status is 1,
+  and with `--every` the next round tries again.
+- **Wallets on Ethereum and Base** store blocks only where the wallet has transfers, so
+  their checkpoint hash is asked of the node at the end of each batch rather than taken
+  from the data.
+- **dbt tests run on every build**, over whole tables, as with `run`; on a large
+  warehouse they take a growing share of each sync.
+- **A DuckDB file has one writer.** `chainstar status` waits up to 15 seconds while a sync
+  step holds it; other tools that open the file can make a sync fail with a hint, as for
+  `run`. For a warehouse others query while it syncs, use Postgres.
+- **Public endpoints** are fine for `--every 5m` on one or two chains. A Bitcoin block is
+  about 6 MB to download from them, so a long Bitcoin catch-up wants your own node.
 
 ## Chains
 
@@ -429,7 +744,8 @@ needs permission to create schemas.
 
 Both targets get three schemas: `chainstar_raw` (the extracted columns, as loaded: cryo's
 for Ethereum and Base, and `bitcoin_*` and `solana_*` tables), `chainstar_staging` (dbt
-views and the `chains` seed) and `chainstar` (the star schema).
+views and the `chains` seed) and `chainstar` (the star schema). `chainstar sync` adds a
+fourth, `chainstar_state`, for its [progress record](#the-progress-record).
 
 ## The star schema
 
@@ -544,7 +860,8 @@ not always have a single sender. `is_zero_address` applies to EVM chains only.
 Every asset moved in the loaded data.
 
 `token_id`, `chain`, `token_address`, `token_standard`, `name`, `symbol`, `decimals`,
-`metadata_block_number`, `has_metadata`
+`metadata_block_number`, `has_metadata`, `first_seen_block`, `last_seen_block` (the first
+and last block in the loaded data where the asset moved)
 
 - **Ethereum, Base**: `token_standard` `erc20`; name, symbol and decimals as cryo read
   them from the contract.
@@ -610,10 +927,13 @@ its not-null test skips that chain.
   and symbols are not read.
 - **Solana block times** are the RPC's estimate; a block without one fails the
   `block_timestamp` not-null test.
-- **Full rebuilds**: dbt rebuilds every star-schema table on each run, so very large
-  warehouses will get slower to update. Incremental models are planned.
-- **Block reorganisations** are not handled. Stay a few blocks behind the chain head
-  (Solana reads only finalized slots, which cannot be rolled back).
+- **Full rebuilds with `run`**: `chainstar run` rebuilds every star-schema table each
+  time, so very large warehouses get slower to update that way; `chainstar sync` builds
+  them incrementally (see [Incremental tables](#incremental-tables)).
+- **Block reorganisations** are handled by `chainstar sync` (see
+  [Reorganisations](#reorganisations)), not by `run`, `quickstart` or `wallet` without
+  `--sync`: with those, stay a few blocks behind the chain head (Solana reads only
+  finalized slots, which cannot be rolled back).
 - **Your RPC provider sets the limits.** Free public endpoints often refuse some
   requests, cap request rates, or answer only for recent blocks (the default publicnode
   endpoints are asked at 2 to 5 requests per second, see

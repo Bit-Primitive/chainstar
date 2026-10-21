@@ -63,8 +63,12 @@ def profile_for(target: Target) -> dict:
     return {"chainstar": {"target": "chainstar", "outputs": {"chainstar": output}}}
 
 
-def build_models(target: Target, work_dir: Path) -> ModelResult:
+def build_models(target: Target, work_dir: Path, *, full_refresh: bool = False) -> ModelResult:
     """Run `dbt build` (seeds, models, tests) and summarise the outcome.
+
+    The star-schema tables are incremental: without full_refresh, each processes
+    only rows above what it already holds (see the dbt project's
+    macros/incremental.sql); with it, every table is rebuilt from the raw tables.
 
     dbt's own output is silenced and written to a log file in `work_dir`, so the
     terminal shows chainstar's concise summary; failures are reported in full.
@@ -100,6 +104,7 @@ def build_models(target: Target, work_dir: Path) -> ModelResult:
                 "debug",
                 "--no-send-anonymous-usage-stats",
                 "--no-use-colors",
+                *(["--full-refresh"] if full_refresh else []),
             ]
         )
 

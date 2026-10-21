@@ -1,9 +1,13 @@
 -- Every calendar day (UTC) from the earliest to the latest loaded block, across chains.
+-- A few hundred rows a year, so it is rebuilt in full on every run, from the
+-- one-row-per-chain summary in int_chain_coverage rather than from every block.
+{{ config(materialized='table') }}
+
 with bounds as (
     select
-        min(block_date) as first_date,
-        max(block_date) as last_date
-    from {{ ref('int_blocks') }}
+        min(first_date) as first_date,
+        max(last_date) as last_date
+    from {{ ref('int_chain_coverage') }}
 ),
 
 days as (

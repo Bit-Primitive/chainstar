@@ -8,6 +8,15 @@ model-paths: ["models"]
 macro-paths: ["macros"]
 seed-paths: ["seeds"]
 
+vars:
+  # The chains the models know, with their EVM chain ids. Kept in step with
+  # chainstar/chains.py by a unit test.
+  chainstar_chains:
+    ethereum: 1
+    base: 8453
+    bitcoin: null
+    solana: null
+
 flags:
   # chainstar sends no telemetry, and neither should dbt on its behalf.
   send_anonymous_usage_stats: false
@@ -21,8 +30,14 @@ models:
     intermediate:
       +schema: staging
       +materialized: view
+    # Incremental: `chainstar sync` builds only rows above each table's per-chain
+    # watermark (see macros/incremental.sql); `chainstar run` rebuilds in full.
+    # delete+insert is the strategy both dbt-duckdb and dbt-postgres support on
+    # every version chainstar allows (merge needs DuckDB 1.4 or Postgres 15).
     marts:
-      +materialized: table
+      +materialized: incremental
+      +incremental_strategy: delete+insert
+      +on_schema_change: fail
 
 seeds:
   chainstar:

@@ -18,9 +18,10 @@ def load_and_build(
 ) -> None:
     for chain in chains:
         load_raw(target, data_dir, get_chain(chain))
-    result = build_models(target, work_dir)
+    # As `chainstar run` does: the load replaced the chain's raw rows, so rebuild.
+    result = build_models(target, work_dir, full_refresh=True)
     assert result.failures == [], result.failures
-    assert result.models == 22
+    assert result.models == 23
     assert result.tests_passed > 40
 
 

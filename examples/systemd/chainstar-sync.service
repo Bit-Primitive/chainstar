@@ -1,0 +1,35 @@
+# One chainstar sync, started every 5 minutes by chainstar-sync.timer.
+#
+# Install (as root), with chainstar installed for the `chainstar` user:
+#   useradd --system --create-home --home-dir /var/lib/chainstar chainstar
+#   sudo -u chainstar uv tool install git+https://github.com/Bit-Primitive/chainstar
+#   cp chainstar-sync.service chainstar-sync.timer /etc/systemd/system/
+#   install -m 600 -o chainstar /dev/null /etc/chainstar.env   # then add the settings below
+#   sudo -u chainstar chainstar sync --chain base --from-recent 100   # first sync, by hand
+#   systemctl daemon-reload && systemctl enable --now chainstar-sync.timer
+#
+# /etc/chainstar.env holds secrets, one per line, for example:
+#   CHAINSTAR_TARGET=postgres:postgresql://chainstar@localhost:5432/chainstar
+#   PGPASSWORD=change-me
+#   CHAINSTAR_RPC_URL_BASE=https://your-base-rpc.example/key
+#
+# Logs: journalctl -u chainstar-sync. Health: sudo -u chainstar chainstar status
+
+[Unit]
+Description=chainstar sync: keep the warehouse up to date
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=chainstar
+WorkingDirectory=/var/lib/chainstar
+EnvironmentFile=/etc/chainstar.env
+# The chains to sync; after the first sync no --from is needed. `which chainstar`
+# as the chainstar user shows the path.
+ExecStart=/var/lib/chainstar/.local/bin/chainstar sync --chain base
+# On stop, SIGTERM stops at the next safe point (at most one extraction stage).
+TimeoutStopSec=5min
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true

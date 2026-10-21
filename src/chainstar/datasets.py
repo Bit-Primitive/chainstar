@@ -256,6 +256,20 @@ def datasets_for(chain: Chain) -> tuple[Dataset, ...]:
     return tuple(dataset for dataset in ALL_DATASETS if dataset.family == chain.family)
 
 
+def ranged_datasets_for(chain: Chain) -> tuple[Dataset, ...]:
+    """The chain's datasets whose rows belong to a block: all but token metadata."""
+    return tuple(dataset for dataset in datasets_for(chain) if dataset is not ERC20_METADATA)
+
+
+def blocks_dataset(chain: Chain) -> Dataset:
+    """The chain's raw blocks: their numbers (Solana: slots), hashes and times."""
+    return {EVM: BLOCKS, BITCOIN: BITCOIN_BLOCKS, SOLANA: SOLANA_BLOCKS}[chain.family]
+
+
+# The column of blocks_dataset() holding the block's Unix time.
+BLOCK_TIME_COLUMN = {EVM: "timestamp", BITCOIN: "timestamp", SOLANA: "block_time"}
+
+
 def coverage_dataset(chain: Chain) -> Dataset:
     """The dataset whose chunk files show which blocks (Solana: slots) were fetched.
 

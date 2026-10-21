@@ -1,0 +1,13 @@
+# Starts chainstar-sync.service 5 minutes after the previous run finished, so runs
+# never overlap, and 2 minutes after boot.
+
+[Unit]
+Description=Run chainstar sync 5 minutes after the last run
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

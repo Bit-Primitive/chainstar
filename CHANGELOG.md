@@ -8,6 +8,44 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Added
 
+- `chainstar sync`: keeps a warehouse up to date. Each run continues from where the
+  last stopped, for one or more chains (`--chain`, repeatable; default `chains` in
+  `chainstar.yml`, else the chains already synced), up to a safe head, then exits; with
+  `--every 5m` it keeps running until Ctrl-C or SIGTERM, which stop at the next safe
+  point: between batches, or (Ethereum, Base) between a batch's extraction and its
+  token-metadata step, before its load. A second one stops at once; both are safe. A
+  chain's first sync needs `--from BLOCK` or `--from-recent N`. Blocks are fetched in batches of ten chunks, each
+  loaded in one transaction together with its progress. One sync per data folder at a
+  time (a lock file).
+- Safe head: a block is synced once it has enough confirmations. Defaults: Ethereum 12,
+  Base 60, Bitcoin 6; Solana syncs finalized slots as before. `--confirmations N`, or
+  `finalized` on Ethereum and Base for the node's finalized block; per chain in
+  `chainstar.yml` (`confirmations:`).
+- Reorganisations deeper than that: before each sync the last synced block's hash is
+  checked against the chain. On a mismatch chainstar finds the newest stored block that
+  still matches (checking up to 128), deletes everything after it (chunk files, raw
+  rows, fact rows), syncs that range again and rebuilds the star schema in full, saying
+  so in the log.
+- Sync progress in the warehouse, `chainstar_state.sync_progress`: per chain the first
+  and last synced block, the hash and time of the newest synced block, the confirmations
+  used, how far the star schema is built, the last run and its error, and the chainstar
+  version.
+- `chainstar status`: per chain, synced to, head and safe head, lag in blocks and time,
+  last run, star-schema state and rows per table; `--json`, and `--max-lag DURATION`
+  exits 1 when any chain is further behind, for health checks.
+- `chainstar wallet ADDRESS --sync`: keeps one address's history current in its own
+  folder and warehouse, rewriting the spreadsheet after each run; `--every`, `--from`,
+  `--confirmations` and `--json-logs` as for sync.
+- Logs for sync: one line per stage (head, check, extract, decode, load, model, export,
+  reorg, rollback) with block range, row counts and time; `--json-logs` writes each as
+  a JSON object.
+- `CHAINSTAR_RPC_URL_<CHAIN>` (for example `CHAINSTAR_RPC_URL_BASE`): an RPC URL per
+  chain, used before `CHAINSTAR_RPC_URL`, so several chains can sync in one command.
+- Examples for running sync as a service: `examples/cron/crontab`,
+  `examples/systemd/chainstar-sync.service` and `.timer`, and
+  `examples/docker-compose.yml` with Postgres and a health check.
+- `dim_tokens.first_seen_block` and `last_seen_block`.
+
 - `chainstar quickstart`: a guided first run. Asks for a chain and how many of the latest
   blocks (default 20, or the latest Bitcoin block), reads the range from the chain head,
   builds `warehouse.duckdb`, and prints next steps (an export command, a ready-to-paste
@@ -70,6 +108,21 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Changed
 
+- The star-schema tables are dbt incremental models (`delete+insert` on their unique
+  key, which dbt-duckdb and dbt-postgres both support). `chainstar sync` builds only rows
+  above what each table already holds, per chain; `chainstar run`, `quickstart` and
+  `wallet` (without `--sync`) still rebuild them in full every time, as before. An
+  incremental build after several syncs gives the same rows as a full rebuild (tested on
+  DuckDB and Postgres). `dim_dates` stays a table, now built from a one-row-per-chain
+  summary (`chainstar_staging.int_chain_coverage`), and `fct_transfers` takes token
+  decimals from `dim_tokens`. `dbt build` now reports 23 models.
+- The `int_*` views are defined by macros the incremental models share;
+  `int_bitcoin_senders` gains `block_number`, and `int_tokens` gains `first_seen_block`
+  and `last_seen_block`.
+- On Postgres, `chainstar sync` indexes the raw tables by chain and block, and the
+  incremental tables are indexed by key and by chain and block, so syncs do not scan
+  whole tables.
+- `chainstar.yml` template: commented `chains` and `confirmations` settings for sync.
 - `chainstar run` without an RPC URL now uses the chain's public endpoint instead of
   stopping with an error.
 - After loading, `chainstar run` says which blocks (Solana: slots) the warehouse holds

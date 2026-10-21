@@ -1,0 +1,13 @@
+# chainstar sync every 5 minutes, from cron. Install with `crontab -e` and adjust
+# the paths. cron starts with almost no environment, so the command sets what
+# chainstar needs; secrets are read from a file only you can read
+# (chmod 600 ~/chainstar/env), with lines such as:
+#   export CHAINSTAR_RPC_URL_BASE=https://your-base-rpc.example/key
+#
+# The first sync needs a starting point; run it once by hand:
+#   cd ~/chainstar && chainstar sync --chain base --from-recent 100
+#
+# A run still going when the next starts is refused by chainstar's own lock on
+# the data folder, so runs never overlap.
+
+*/5 * * * * cd "$HOME/chainstar" && . ./env && "$HOME/.local/bin/chainstar" sync --chain base >> sync.log 2>&1

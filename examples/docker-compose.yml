@@ -1,0 +1,58 @@
+# chainstar keeping a Postgres warehouse in sync, every 5 minutes.
+#
+#   docker compose up -d
+#   docker compose logs -f sync          # one line per stage
+#   docker compose exec sync chainstar status
+#   docker compose down                  # stops at the next safe point; data stays
+#
+# Put your own RPC URLs and a real password in a .env file next to this one:
+#
+#   PGPASSWORD=change-me
+#   CHAINSTAR_RPC_URL_BASE=https://your-base-rpc.example/key
+#
+# Without an RPC URL chainstar uses the free shared public endpoint, slowly.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chainstar
+      POSTGRES_PASSWORD: ${PGPASSWORD:-chainstar}
+      POSTGRES_DB: chainstar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "chainstar", "-d", "chainstar"]
+      interval: 5s
+      retries: 10
+    # To query the warehouse from your machine, uncomment (it stays on localhost):
+    # ports: ["127.0.0.1:5432:5432"]
+    restart: unless-stopped
+
+  sync:
+    image: ${CHAINSTAR_IMAGE:-ghcr.io/bit-primitive/chainstar:latest}
+    # --from-recent applies to the first sync only; restarts resume where it stopped.
+    command: ["sync", "--chain", "base", "--from-recent", "100", "--every", "5m"]
+    environment:
+      CHAINSTAR_TARGET: postgres:postgresql://chainstar@db:5432/chainstar
+      PGPASSWORD: ${PGPASSWORD:-chainstar}
+      CHAINSTAR_RPC_URL_BASE: ${CHAINSTAR_RPC_URL_BASE:-}
+    volumes:
+      - chainstar-data:/work   # the Parquet chunks
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # SIGTERM stops at the next safe point (at most one extraction stage); give it
+    # time before Docker kills it.
+    stop_grace_period: 3m
+    healthcheck:
+      # Unhealthy when the newest synced block is over 15 minutes old.
+      test: ["CMD", "chainstar", "status", "--max-lag", "15m"]
+      interval: 5m
+      timeout: 1m
+      start_period: 15m
+
+volumes:
+  pgdata:
+  chainstar-data:

@@ -240,6 +240,12 @@ models:
         description: ERC-20 only. Block at which name, symbol and decimals were read.
       - name: has_metadata
         description: False when none of name, symbol and decimals is known.
+      - name: first_seen_block
+        description: First block (Solana slot) in the loaded data where the asset moved.
+        data_tests: [not_null]
+      - name: last_seen_block
+        description: Last block (Solana slot) in the loaded data where the asset moved.
+        data_tests: [not_null]
 
   - name: dim_contracts
     description: >

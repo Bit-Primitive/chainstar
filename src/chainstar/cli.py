@@ -1,5 +1,6 @@
-"""Command-line interface: quickstart, run, export, wallet, doctor and init."""
+"""Command-line interface: quickstart, run, sync, status, export, wallet, doctor and init."""
 
+import json
 import os
 import sys
 import traceback
@@ -26,9 +27,14 @@ from chainstar.config import (
     BlockRange,
     ConfigError,
     load_config_file,
+    parse_duration,
+    resolve_connection,
+    resolve_data_dir,
     resolve_rpc,
     resolve_settings,
     rpc_env_name,
+    rpc_secrets,
+    target_spec,
 )
 from chainstar.cryo import INSTALL_HINT, CryoError, cryo_version, find_cryo
 from chainstar.errors import bug_report_hint, describe, hint_for
@@ -42,13 +48,28 @@ from chainstar.export import (
     normalize_address,
 )
 from chainstar.export import resolve_format as resolve_export_format
+from chainstar.heads import ChainNode, confirmations_for
 from chainstar.load import LoadError, attach
 from chainstar.model import ModelError
 from chainstar.pipeline import PipelineError, run_pipeline
+from chainstar.public_rpc import public_notice
 from chainstar.quickstart import DEFAULT_RECENT, cryo_missing_message, next_steps, recent_range
 from chainstar.redact import redact_text, redact_url
+from chainstar.reorg import ReorgTooDeep
 from chainstar.rpc import RpcError, identify_node
-from chainstar.targets import TARGET_HELP, DuckDBTarget, TargetError, parse_target
+from chainstar.state import read_states
+from chainstar.status import StatusError, collect, render_text, to_json
+from chainstar.sync import (
+    ChainPlan,
+    StopFlag,
+    Syncer,
+    SyncError,
+    SyncPlan,
+    describe_rpc,
+    rpc_sources,
+)
+from chainstar.synclog import ALL_CHAINS, SyncLog
+from chainstar.targets import TARGET_HELP, DuckDBTarget, Target, TargetError, parse_target
 
 app = typer.Typer(
     help="Raw blockchain data to clean dimensional tables in your own warehouse, from one command."
@@ -93,6 +114,23 @@ ChunkOption = Annotated[
 DataDirOption = Annotated[
     Path | None, typer.Option(help="Where Parquet files are kept. Default ./data.")
 ]
+EveryOption = Annotated[
+    str | None,
+    typer.Option(
+        help="Keep running: sync again every DURATION (30s, 5m, 2h) until stopped with "
+        "Ctrl-C or SIGTERM, which stop at the next safe point."
+    ),
+]
+ConfirmationsOption = Annotated[
+    str | None,
+    typer.Option(
+        help="Confirmations a block needs before it is synced, or `finalized` (Ethereum, "
+        "Base). Default: ethereum 12, base 60, bitcoin 6; Solana always syncs finalized slots."
+    ),
+]
+JsonLogsOption = Annotated[
+    bool, typer.Option("--json-logs", help="Write each log line as a JSON object.")
+]
 
 # Errors we expect users to hit (bad input, unreachable services, files). They get
 # one line and a hint instead of a traceback; --debug shows the traceback too.
@@ -109,6 +147,9 @@ USER_ERRORS = (
     ModelError,
     PipelineError,
     ExportError,
+    SyncError,
+    StatusError,
+    ReorgTooDeep,
 )
 
 _state = {"debug": False}
@@ -158,7 +199,7 @@ def _friendly_errors(secrets: list[str | None]) -> Iterator[None]:
 
 
 def _secrets(rpc_url: str | None) -> list[str | None]:
-    return [rpc_url, os.environ.get(DEFAULT_RPC_ENV)]
+    return [*rpc_secrets(rpc_url, {}), os.environ.get(DEFAULT_RPC_ENV)]
 
 
 @app.command(
@@ -302,6 +343,227 @@ def run(
 
 @app.command(
     epilog="**Examples**\n\n```\n"
+    "chainstar sync --chain base --from-recent 100        # first sync: the latest 100 blocks\n"
+    "chainstar sync --chain base                          # later: continue where it stopped\n"
+    "chainstar sync --chain ethereum --chain solana --every 5m\n"
+    "chainstar sync --chain bitcoin --from 972000 "
+    "--target postgres:postgresql://me@localhost:5432/chain\n```\n\n"
+    "A chain's first sync needs --from or --from-recent; later syncs resume from the "
+    "warehouse's own record (chainstar_state.sync_progress). Blocks are synced only once "
+    "they have enough confirmations, and a deeper reorganisation is detected and rolled "
+    "back. With several chains, give each its RPC URL in `CHAINSTAR_RPC_URL_<CHAIN>`, e.g. "
+    "CHAINSTAR_RPC_URL_BASE."
+)
+def sync(
+    chain: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--chain",
+            help="Chain to sync; repeat for several. Default: `chains` in chainstar.yml, "
+            "else every chain already synced into the target.",
+        ),
+    ] = None,
+    from_block: Annotated[
+        int | None,
+        typer.Option("--from", help="First sync only: start at this block (Solana: slot)."),
+    ] = None,
+    from_recent: Annotated[
+        int | None,
+        typer.Option(
+            "--from-recent",
+            help="First sync only: start this many blocks (Solana: slots) before the safe head.",
+        ),
+    ] = None,
+    every: EveryOption = None,
+    confirmations: ConfirmationsOption = None,
+    full_refresh: Annotated[
+        bool,
+        typer.Option(
+            "--full-refresh", help="Rebuild the star-schema tables in full, not incrementally."
+        ),
+    ] = False,
+    json_logs: JsonLogsOption = False,
+    rpc_url: Annotated[
+        str | None,
+        typer.Option(
+            "--rpc-url",
+            help="JSON-RPC URL, for a single chain. Defaults to `CHAINSTAR_RPC_URL_<CHAIN>`, then "
+            "CHAINSTAR_RPC_URL, then the chain's free shared public endpoint.",
+        ),
+    ] = None,
+    target: TargetOption = None,
+    data_dir: DataDirOption = None,
+    requests_per_second: RateOption = None,
+    chunk_size: ChunkOption = None,
+    config: ConfigOption = Path(CONFIG_FILENAME),
+) -> None:
+    """Bring the warehouse up to date from where it left off, once or on an interval."""
+    with _friendly_errors(_secrets(rpc_url)):
+        file_config = load_config_file(config)
+        parsed_target = parse_target(target_spec(target, file_config))
+        chains = _sync_chains(chain, file_config, parsed_target)
+        if rpc_url and len(chains) > 1:
+            raise ConfigError(
+                "--rpc-url names one endpoint, but several chains are being synced; set "
+                "CHAINSTAR_RPC_URL_<CHAIN> for each instead, e.g. CHAINSTAR_RPC_URL_BASE"
+            )
+        if from_block is not None and len(chains) > 1:
+            raise ConfigError("--from is a block of one chain; with several, use --from-recent N")
+        plan = SyncPlan(
+            target=parsed_target,
+            data_dir=resolve_data_dir(data_dir, file_config),
+            chains=tuple(
+                _chain_plan(c, file_config, rpc_url, requests_per_second, chunk_size, confirmations)
+                for c in chains
+            ),
+            from_block=from_block,
+            from_recent=_check_from(from_block, from_recent),
+            full_refresh=full_refresh,
+        )
+        seconds = parse_duration(every) if every else None
+        log = SyncLog(typer.echo, json_lines=json_logs, secrets=rpc_secrets(rpc_url, file_config))
+    _run_sync(plan, log, seconds, rpc_env_name(file_config), rpc_url)
+
+
+def _sync_chains(names: list[str] | None, file_config: dict, target: Target) -> list[Chain]:
+    """--chain, then chainstar.yml's chains (or chain), then the chains already synced."""
+    configured = file_config.get("chains") or (
+        [file_config["chain"]] if file_config.get("chain") else []
+    )
+    chosen = names or configured
+    if not chosen and not (isinstance(target, DuckDBTarget) and not target.path.exists()):
+        with attach(target) as warehouse:
+            chosen = list(read_states(warehouse))
+    if not chosen:
+        raise ConfigError(
+            "no chain to sync: pass --chain (repeat it for several) or set `chains` in "
+            "chainstar.yml"
+        )
+    selected = [get_chain(name) for name in chosen]
+    return list(dict.fromkeys(selected))
+
+
+def _check_from(from_block: int | None, from_recent: int | None) -> int | None:
+    if from_block is not None and from_recent is not None:
+        raise ConfigError("give --from or --from-recent, not both")
+    if from_block is not None and from_block < 0:
+        raise ConfigError(f"--from must be a block number, got {from_block}")
+    if from_recent is not None and from_recent < 1:
+        raise ConfigError(f"--from-recent must be at least 1, got {from_recent}")
+    return from_recent
+
+
+def _chain_plan(
+    chain: Chain,
+    file_config: dict,
+    rpc_url: str | None,
+    requests_per_second: int | None,
+    chunk_size: int | None,
+    confirmations: str | None,
+) -> ChainPlan:
+    return ChainPlan(
+        chain=chain,
+        connection=resolve_connection(
+            file_config=file_config,
+            chain=chain,
+            rpc_url=rpc_url,
+            requests_per_second=requests_per_second,
+            chunk_size=chunk_size,
+        ),
+        confirmations=confirmations_for(chain, confirmations, file_config.get("confirmations")),
+    )
+
+
+def _run_sync(
+    plan: SyncPlan,
+    log: SyncLog,
+    every: int | None,
+    rpc_env: str,
+    rpc_url: str | None,
+    after_pass=None,
+) -> None:
+    """Run a sync plan with its header lines, signal handling and exit code."""
+    log.info(
+        ALL_CHAINS,
+        "start",
+        f"chainstar {__version__}; target {plan.target.describe()}; data {plan.data_dir}"
+        + (f"; every {every}s" if every else ""),
+    )
+    for chain_plan in plan.chains:
+        log.info(chain_plan.chain.name, "rpc", describe_rpc(chain_plan))
+        if chain_plan.connection.rpc.public:
+            log.info(chain_plan.chain.name, "note", public_notice(chain_plan.chain, rpc_env))
+    stop = StopFlag()
+    syncer = Syncer(plan, rpc_sources(plan), log, stop, debug=_state["debug"])
+    with _friendly_errors(_secrets(rpc_url)), stop.handling_signals():
+        ok = syncer.run(every, after_pass)
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command(
+    epilog="**Examples**\n\n```\n"
+    "chainstar status\n"
+    "chainstar status --chain base --json\n"
+    "chainstar status --max-lag 15m          # exits 1 if any chain is further behind\n```\n\n"
+    "Lag in time is measured from the newest synced block's own time, so it includes the "
+    "confirmation depth (about an hour on Bitcoin); set --max-lag per chain accordingly."
+)
+def status(
+    chain: Annotated[
+        list[str] | None,
+        typer.Option("--chain", help="Only this chain; repeat for several. Default: all synced."),
+    ] = None,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print JSON instead of text.")
+    ] = False,
+    max_lag: Annotated[
+        str | None,
+        typer.Option(
+            help="Exit with status 1 when any chain's newest synced block is older than "
+            "DURATION (30s, 15m, 2h), for health checks and monitoring."
+        ),
+    ] = None,
+    rpc_url: Annotated[
+        str | None,
+        typer.Option("--rpc-url", help="JSON-RPC URL for the head, for a single chain."),
+    ] = None,
+    target: TargetOption = None,
+    config: ConfigOption = Path(CONFIG_FILENAME),
+) -> None:
+    """How far each chain is synced, the chain's head, the lag, and rows per table."""
+    with _friendly_errors(_secrets(rpc_url)):
+        file_config = load_config_file(config)
+        names = [get_chain(name).name for name in chain or []]
+        if rpc_url and len(names) != 1:
+            raise ConfigError("--rpc-url applies to one chain; pass exactly one --chain with it")
+
+        def node_for(selected: Chain) -> ChainNode:
+            rpc = resolve_rpc(rpc_url, file_config, selected)
+            return ChainNode(selected, rpc.url, None)
+
+        report = collect(
+            parse_target(target_spec(target, file_config)),
+            names,
+            node_for,
+            parse_duration(max_lag) if max_lag else None,
+        )
+        if not report.chains:
+            raise StatusError(
+                f"nothing has been synced into {report.target} yet; "
+                "run `chainstar sync --chain CHAIN --from-recent N` first"
+            )
+        secrets = rpc_secrets(rpc_url, file_config)
+        if json_output:
+            typer.echo(redact_text(json.dumps(to_json(report), indent=2), secrets))
+        else:
+            for line in render_text(report):
+                typer.echo(redact_text(line, secrets))
+    if report.healthy is False:
+        raise typer.Exit(1)
+
+
+@app.command(
+    epilog="**Examples**\n\n```\n"
     "chainstar quickstart                                  # asks a few questions\n"
     "chainstar quickstart --chain base --yes               # no questions, for scripts\n"
     "chainstar quickstart --chain solana --recent 50 --yes\n"
@@ -439,12 +701,15 @@ def export_command(
     "chainstar wallet 0xYourAddress --chain base --recent 1000\n"
     "chainstar wallet 0xYourAddress --chain ethereum --blocks 20000000:20001000 "
     '--rpc-url "$MY_RPC" --blocks-per-request 500\n'
-    "chainstar wallet YourSolanaAddress --chain solana --recent 50 --output mine.csv\n```\n\n"
+    "chainstar wallet YourSolanaAddress --chain solana --recent 50 --output mine.csv\n"
+    "chainstar wallet 0xYourAddress --chain base --recent 1000 --sync --every 10m\n```\n\n"
     "On Ethereum and Base the RPC node filters the transfers, so only this address's "
     "are downloaded: two requests per --blocks-per-request blocks, plus one per block "
     "that has a transfer. Bitcoin and Solana nodes cannot filter by address, so every "
     "block in the range is read. Each wallet gets its own folder under ./data, so it "
-    "never mixes with your main warehouse."
+    "never mixes with your main warehouse. With --sync the history is kept current: "
+    "the first run starts at --recent N (or --from BLOCK), each later run continues "
+    "where the last stopped, and the spreadsheet is rewritten every time."
 )
 def wallet(
     address: Annotated[str, typer.Argument(help="The address whose transfers you want.")],
@@ -475,9 +740,44 @@ def wallet(
     ] = 1,
     requests_per_second: RateOption = None,
     chunk_size: ChunkOption = None,
+    keep_synced: Annotated[
+        bool,
+        typer.Option(
+            "--sync",
+            help="Keep the history current: continue from where the last run stopped, "
+            "and rewrite the spreadsheet each time.",
+        ),
+    ] = False,
+    from_block: Annotated[
+        int | None,
+        typer.Option("--from", help="With --sync, first run only: start at this block."),
+    ] = None,
+    every: EveryOption = None,
+    confirmations: ConfirmationsOption = None,
+    json_logs: JsonLogsOption = False,
 ) -> None:
     """All token transfers sent or received by one address in a range, as a spreadsheet."""
+    if keep_synced:
+        _sync_wallet(
+            address=address,
+            chain=chain,
+            blocks=blocks,
+            recent=recent,
+            from_block=from_block,
+            output=output,
+            rpc_url=rpc_url,
+            blocks_per_request=blocks_per_request,
+            requests_per_second=requests_per_second,
+            chunk_size=chunk_size,
+            every=every,
+            confirmations=confirmations,
+            json_logs=json_logs,
+        )
     with _friendly_errors(_secrets(rpc_url)):
+        sync_only = {"--from": from_block, "--every": every, "--confirmations": confirmations}
+        used = [flag for flag, value in sync_only.items() if value is not None]
+        if used or json_logs:
+            raise ConfigError(f"{', '.join(used or ['--json-logs'])} needs --sync")
         selected = get_chain(chain)
         if (blocks is None) == (recent is None):
             raise ConfigError("give either --blocks START:END or --recent N")
@@ -487,7 +787,7 @@ def wallet(
         if recent is not None:
             blocks = str(_recent_blocks(selected, recent, rpc_url))
         normalized = normalize_address(address)
-        folder = Path(DEFAULT_DATA_DIR) / f"wallet-{selected.name}-{normalized}"
+        folder = _wallet_folder(selected, normalized)
         settings = resolve_settings(
             file_config={},
             chain=selected.name,
@@ -510,6 +810,65 @@ def wallet(
         )
         typer.echo("")
         typer.echo(f"wrote {rows:,} transfers of {normalized} to {path}")
+
+
+def _wallet_folder(chain: Chain, address: str) -> Path:
+    # Its own folder and warehouse, so a wallet never mixes with the main warehouse.
+    return Path(DEFAULT_DATA_DIR) / f"wallet-{chain.name}-{address}"
+
+
+def _sync_wallet(
+    *,
+    address: str,
+    chain: str,
+    blocks: str | None,
+    recent: int | None,
+    from_block: int | None,
+    output: Path | None,
+    rpc_url: str | None,
+    blocks_per_request: int,
+    requests_per_second: int | None,
+    chunk_size: int | None,
+    every: str | None,
+    confirmations: str | None,
+    json_logs: bool,
+) -> None:
+    """`chainstar wallet --sync`: a sync of one address, re-exporting after each pass."""
+    with _friendly_errors(_secrets(rpc_url)):
+        selected = get_chain(chain)
+        if blocks is not None:
+            raise ConfigError(
+                "--blocks is a fixed range; with --sync give --recent N or --from BLOCK for "
+                "the first run, and later runs continue on their own"
+            )
+        if selected.family == EVM and find_cryo() is None:
+            typer.echo(cryo_missing_message(selected), err=True)
+            raise typer.Exit(1)
+        normalized = normalize_address(address)
+        folder = _wallet_folder(selected, normalized)
+        plan = SyncPlan(
+            target=DuckDBTarget(folder / "warehouse.duckdb"),
+            data_dir=folder,
+            chains=(
+                _chain_plan(selected, {}, rpc_url, requests_per_second, chunk_size, confirmations),
+            ),
+            from_block=from_block,
+            from_recent=_check_from(from_block, recent),
+            wallet=normalized,
+            blocks_per_request=blocks_per_request,
+        )
+        seconds = parse_duration(every) if every else None
+        log = SyncLog(typer.echo, json_lines=json_logs, secrets=rpc_secrets(rpc_url, {}))
+        path, chosen = resolve_export_format(
+            output or Path(f"{selected.name}-{normalized}.xlsx"), None, TRANSFERS_VIEW
+        )
+        request = ExportRequest(TRANSFERS_VIEW, path, chosen, selected.name, normalized)
+
+    def export_wallet() -> None:
+        rows = export(plan.target, request)
+        log.info(selected.name, "export", f"wrote {rows:,} transfers of {normalized} to {path}")
+
+    _run_sync(plan, log, seconds, DEFAULT_RPC_ENV, rpc_url, export_wallet)
 
 
 def _dbt_versions() -> str:

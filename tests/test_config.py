@@ -2,13 +2,17 @@ from pathlib import Path
 
 import pytest
 
+from chainstar.chains import get_chain
 from chainstar.config import (
     CONFIG_TEMPLATE,
     BlockRange,
     ConfigError,
     load_config_file,
     parse_block_range,
+    parse_duration,
+    resolve_rpc,
     resolve_settings,
+    rpc_secrets,
 )
 from chainstar.targets import DuckDBTarget
 
@@ -110,3 +114,27 @@ def test_chunk_size_defaults_and_validates(monkeypatch):
     assert _resolve({"chunk_size": 10}, chain="base", blocks="1:2").chunk_size == 10
     with pytest.raises(ConfigError, match="chunk_size"):
         _resolve(chain="base", blocks="1:2", chunk_size=-1)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"), [("30s", 30), ("5m", 300), (" 2h ", 7200), ("1d", 86400), ("10M", 600)]
+)
+def test_parse_duration(text, seconds):
+    assert parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["5", "0m", "5 minutes", "-1m", ""])
+def test_parse_duration_refuses(text):
+    with pytest.raises(ConfigError, match="duration"):
+        parse_duration(text)
+
+
+def test_each_chain_can_have_its_own_rpc(monkeypatch):
+    monkeypatch.setenv("CHAINSTAR_RPC_URL", "https://shared.example")
+    monkeypatch.setenv("CHAINSTAR_RPC_URL_SOLANA", "https://solana.example/key")
+    assert resolve_rpc(None, {}, get_chain("solana")).url == "https://solana.example/key"
+    assert resolve_rpc(None, {}, get_chain("base")).url == "https://shared.example"
+    assert resolve_rpc("https://flag.example", {}, get_chain("solana")).url == (
+        "https://flag.example"
+    )
+    assert set(rpc_secrets(None, {})) == {"https://shared.example", "https://solana.example/key"}

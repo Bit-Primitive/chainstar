@@ -37,3 +37,13 @@ def test_every_chain_has_a_public_endpoint():
 
     assert set(PUBLIC_ENDPOINTS) == set(SUPPORTED_CHAINS)
     assert all(e.url.startswith("https://") for e in PUBLIC_ENDPOINTS.values())
+
+
+def test_dbt_chain_list_matches_python_registry():
+    # The incremental models filter EVM rows by chain id, from this dbt variable.
+    import yaml
+
+    project = yaml.safe_load((DBT_PROJECT_DIR / "dbt_project.yml").read_text())
+    assert project["vars"]["chainstar_chains"] == {
+        name: chain.chain_id for name, chain in SUPPORTED_CHAINS.items()
+    }

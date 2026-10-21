@@ -5,8 +5,19 @@ import duckdb
 import pytest
 
 from chainstar.chains import get_chain
+from chainstar.config import BlockRange
 from chainstar.datasets import BLOCKS, SOLANA_BLOCKS, TRANSACTIONS, dataset_dir, parquet_files
-from chainstar.load import LoadError, attach, load_raw
+from chainstar.load import (
+    LoadError,
+    attach,
+    delete_from_block,
+    load_range,
+    load_raw,
+    overlapping_files,
+    prepare_raw,
+    stored_blocks,
+    transaction,
+)
 from chainstar.targets import DuckDBTarget, parse_target
 
 ETHEREUM = get_chain("ethereum")
@@ -104,3 +115,59 @@ def test_refuses_another_chains_files_by_name(data_dir: Path, tmp_path: Path):
     (wrong / "copy.parquet").unlink()
     with pytest.raises(LoadError, match="expected solana"):
         load_raw(DuckDBTarget(tmp_path / "w.duckdb"), data_dir, get_chain("solana"))
+
+
+def _count(target: DuckDBTarget, table: str, where: str = "true") -> int:
+    with duckdb.connect(str(target.path), read_only=True) as connection:
+        return connection.execute(
+            f"SELECT count(*) FROM chainstar_raw.{table} WHERE {where}"
+        ).fetchone()[0]
+
+
+def test_load_range_replaces_only_its_blocks(data_dir: Path, tmp_path: Path):
+    target = DuckDBTarget(tmp_path / "w.duckdb")
+    with attach(target) as warehouse:
+        prepare_raw(warehouse)
+        with transaction(warehouse):
+            first = load_range(warehouse, data_dir, ETHEREUM, BlockRange(26239738, 26239739))
+        assert first["erc20_transfers"] == 541
+        assert first["erc20_metadata"] == 11
+        with transaction(warehouse):
+            second = load_range(warehouse, data_dir, ETHEREUM, BlockRange(26239739, 26239740))
+            # Loading the same range again replaces rather than adds.
+            load_range(warehouse, data_dir, ETHEREUM, BlockRange(26239739, 26239740))
+        assert second["erc20_transfers"] == 21
+    assert _count(target, "erc20_transfers") == 562
+    assert _count(target, "erc20_metadata") == 11
+
+
+def test_overlapping_files_by_name(tmp_path: Path):
+    folder = tmp_path / "ethereum" / "blocks"
+    folder.mkdir(parents=True)
+    for name in (
+        "ethereum__blocks__00000100_to_00000109.parquet",
+        "ethereum__blocks__00000110_to_00000119.parquet",
+        "ethereum__blocks__abc123__00000120_to_00000125.parquet",
+        "no-span.parquet",
+    ):
+        (folder / name).touch()
+
+    def found(first: int, last: int | None = None) -> int:
+        return len(overlapping_files(tmp_path, ETHEREUM, BLOCKS, first, last))
+
+    assert found(105, 112) == 3  # two chunks and the file without a span
+    assert found(119) == 3
+    assert found(126) == 1
+
+
+def test_delete_from_block_and_stored_blocks(data_dir: Path, tmp_path: Path):
+    target = DuckDBTarget(tmp_path / "w.duckdb")
+    load_raw(target, data_dir, ETHEREUM)
+    with attach(target) as warehouse:
+        newest = stored_blocks(warehouse, ETHEREUM, 26239739, 5)
+        assert [b.number for b in newest] == [26239739, 26239738]
+        assert newest[0].hash.startswith("0x") and newest[0].time > 1_700_000_000
+        deleted = delete_from_block(warehouse, ETHEREUM, 26239739)
+    assert deleted == 21 + 25 + 1  # transfers, transactions and the block
+    assert _count(target, "erc20_metadata") == 11  # metadata belongs to no block
+    assert _count(target, "blocks") == 1
