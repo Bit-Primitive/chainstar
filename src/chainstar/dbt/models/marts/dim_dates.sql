@@ -16,12 +16,12 @@ days as (
 
 select
     date_day,
-    cast(extract(year from date_day) as integer) as year,
-    cast(extract(quarter from date_day) as integer) as quarter,
-    cast(extract(month from date_day) as integer) as month,
-    cast(extract(day from date_day) as integer) as day_of_month,
-    cast(extract(isodow from date_day) as integer) as iso_day_of_week,
-    cast(extract(week from date_day) as integer) as iso_week,
-    extract(isodow from date_day) in (6, 7) as is_weekend
+    cast({{ chainstar.date_part('year', 'date_day') }} as integer) as year,
+    cast({{ chainstar.date_part('quarter', 'date_day') }} as integer) as quarter,
+    cast({{ chainstar.date_part('month', 'date_day') }} as integer) as month,
+    cast({{ chainstar.date_part('day', 'date_day') }} as integer) as day_of_month,
+    cast({{ chainstar.date_part('isodow', 'date_day') }} as integer) as iso_day_of_week,
+    cast({{ chainstar.date_part('isoweek', 'date_day') }} as integer) as iso_week,
+    cast({{ chainstar.date_part('isodow', 'date_day') }} in (6, 7) as {{ chainstar.type_boolean() }}) as is_weekend
 from days
 where date_day is not null

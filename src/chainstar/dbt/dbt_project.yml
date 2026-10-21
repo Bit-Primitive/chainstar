@@ -32,11 +32,14 @@ models:
       +materialized: view
     # Incremental: `chainstar sync` builds only rows above each table's per-chain
     # watermark (see macros/incremental.sql); `chainstar run` rebuilds in full.
-    # delete+insert is the strategy both dbt-duckdb and dbt-postgres support on
-    # every version chainstar allows (merge needs DuckDB 1.4 or Postgres 15).
+    # delete+insert on each table's unique key: dbt-duckdb, dbt-postgres,
+    # dbt-snowflake and dbt-clickhouse (as delete_insert, with lightweight
+    # deletes) support it on every version chainstar allows; merge needs DuckDB
+    # 1.4 or Postgres 15. dbt-bigquery has no delete+insert, and its merge on the
+    # same key replaces the same rows.
     marts:
       +materialized: incremental
-      +incremental_strategy: delete+insert
+      +incremental_strategy: "{{ 'merge' if target.type == 'bigquery' else 'delete+insert' }}"
       +on_schema_change: fail
 
 seeds:

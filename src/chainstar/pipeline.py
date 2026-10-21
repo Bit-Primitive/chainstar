@@ -14,11 +14,13 @@ from chainstar.extract import (
     extract_dataset,
     extract_wallet_transfers,
 )
+from chainstar.lake import publish as publish_lake
 from chainstar.load import RAW_SCHEMA, held_ranges, load_raw, table_row_counts
 from chainstar.model import MART_SCHEMA, MART_TABLES, ModelError, build_models
 from chainstar.public_rpc import public_notice
 from chainstar.redact import redact_url
 from chainstar.rpc import identify_node
+from chainstar.targets import LakeTarget
 
 # Extractors for the chains cryo does not support. Each returns rows per dataset.
 JSON_RPC_EXTRACTORS = {BITCOIN: bitcoin.extract, SOLANA: solana.extract}
@@ -127,6 +129,11 @@ def run_pipeline(settings: RunSettings, echo: Echo, rpc_env: str = DEFAULT_RPC_E
         if result.warnings:
             detail += f", {result.warnings} warnings"
         _line(echo, "model", "dbt build", detail, elapsed())
+
+        if isinstance(settings.target, LakeTarget):
+            with _timed() as elapsed:
+                published = publish_lake(settings.target)
+            _line(echo, "publish", "parquet lake", published.describe(), elapsed())
 
     counts = table_row_counts(settings.target, MART_SCHEMA, MART_TABLES)
     echo("")

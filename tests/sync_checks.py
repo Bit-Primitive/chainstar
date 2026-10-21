@@ -27,6 +27,15 @@ SNAPSHOT_TABLES = [
 
 def snapshot(target: Target) -> dict[str, list[tuple]]:
     with attach(target) as warehouse:
+        if not warehouse.via_duckdb:
+            # A remote warehouse's rows, sorted by DuckDB.
+            tables = {}
+            for schema, table in SNAPSHOT_TABLES:
+                warehouse.fetch_into("rows", f"SELECT * FROM {warehouse.table(schema, table)}", [])
+                tables[table] = warehouse.local.execute(
+                    "SELECT * FROM rows ORDER BY ALL"
+                ).fetchall()
+            return tables
         return {
             table: warehouse.connection.execute(
                 f"SELECT * FROM {warehouse.table(schema, table)} ORDER BY ALL"
@@ -108,11 +117,11 @@ def reorg_matches_a_full_rebuild(target: Target, tmp_path: Path) -> None:
 
     after = assert_matches_full_rebuild(target, syncer.plan.work_dir)
     with attach(target) as warehouse:
-        raw = warehouse.connection.execute(
+        raw = warehouse.query(
             f"SELECT count(*) FROM {warehouse.table('chainstar_raw', 'erc20_transfers')} "
             "WHERE block_number = ?",
             [last],
-        ).fetchone()[0]
+        )[0][0]
     in_mart = [row for row in after["fct_transfers"] if row[2] == last]
     assert len(in_mart) == raw
     assert raw < len([row for row in before["fct_transfers"] if row[2] == last])

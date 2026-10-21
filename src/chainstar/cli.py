@@ -49,12 +49,13 @@ from chainstar.export import (
 )
 from chainstar.export import resolve_format as resolve_export_format
 from chainstar.heads import ChainNode, confirmations_for
+from chainstar.lake import configure as configure_lake
 from chainstar.load import LoadError, attach
 from chainstar.model import ModelError
 from chainstar.pipeline import PipelineError, run_pipeline
 from chainstar.public_rpc import public_notice
 from chainstar.quickstart import DEFAULT_RECENT, cryo_missing_message, next_steps, recent_range
-from chainstar.redact import redact_text, redact_url
+from chainstar.redact import redact_text, redact_url, redact_values
 from chainstar.reorg import ReorgTooDeep
 from chainstar.rpc import RpcError, identify_node
 from chainstar.state import read_states
@@ -69,7 +70,21 @@ from chainstar.sync import (
     rpc_sources,
 )
 from chainstar.synclog import ALL_CHAINS, SyncLog
-from chainstar.targets import TARGET_HELP, DuckDBTarget, Target, TargetError, parse_target
+from chainstar.targets import (
+    MOTHERDUCK_TOKEN_ENVS,
+    TARGET_HELP,
+    BigQueryTarget,
+    ClickHouseTarget,
+    DuckDBTarget,
+    LakeTarget,
+    MotherDuckTarget,
+    PostgresTarget,
+    SnowflakeTarget,
+    Target,
+    TargetError,
+    credential_secrets,
+    parse_target,
+)
 
 app = typer.Typer(
     help="Raw blockchain data to clean dimensional tables in your own warehouse, from one command."
@@ -176,7 +191,7 @@ def main(
 
 @contextmanager
 def _friendly_errors(secrets: list[str | None]) -> Iterator[None]:
-    """Turn failures into `error:` and `hint:` lines, with RPC URLs redacted."""
+    """Turn failures into `error:` and `hint:` lines, with RPC URLs and credentials redacted."""
     known = [secret for secret in secrets if secret]
     try:
         yield
@@ -189,9 +204,13 @@ def _friendly_errors(secrets: list[str | None]) -> Iterator[None]:
         )
         raise typer.Exit(130) from None
     except Exception as error:
+
+        def redact(text: str) -> str:
+            return redact_values(redact_text(text, known), credential_secrets())
+
         if _state["debug"]:
-            typer.echo(redact_text(traceback.format_exc(), known), err=True)
-        typer.echo(f"\nerror: {redact_text(describe(error), known)}", err=True)
+            typer.echo(redact(traceback.format_exc()), err=True)
+        typer.echo(f"\nerror: {redact(describe(error))}", err=True)
         hint = hint_for(error) if isinstance(error, USER_ERRORS) else bug_report_hint()
         if hint:
             typer.echo(f"hint:  {hint}", err=True)
@@ -280,22 +299,18 @@ def doctor(
         report(False, "rpc", str(error))
 
     spec = target or os.environ.get(TARGET_ENV) or file_config.get("target", DEFAULT_TARGET)
+    parsed = None
     try:
         parsed = parse_target(spec)
-        if isinstance(parsed, DuckDBTarget) and not parsed.path.exists():
-            # Connecting would create the file; doctor should not change anything.
-            report(True, "target", f"{parsed.describe()} does not exist yet; run will create it")
-        else:
-            with attach(parsed) as warehouse:
-                warehouse.connection.execute("SELECT 1").fetchone()
-            report(True, "target", f"{parsed.describe()} reachable")
+        report(True, "target", _check_target(parsed))
     except TargetError as error:
         report(False, "target", str(error))
     except Exception as error:  # any driver error means "not reachable"; show why
         hint = hint_for(error)
-        report(False, "target", f"{type(error).__name__}: {error}" + (f" ({hint})" if hint else ""))
+        message = redact_values(f"{type(error).__name__}: {error}", credential_secrets(parsed))
+        report(False, "target", message + (f" ({hint})" if hint else ""))
 
-    dbt_detail = _dbt_versions()
+    dbt_detail = _dbt_versions(parsed)
     report("missing" not in dbt_detail, "dbt", dbt_detail)
     if problems:
         typer.echo(f"\n{problems} problem(s) found.")
@@ -871,11 +886,73 @@ def _sync_wallet(
     _run_sync(plan, log, seconds, DEFAULT_RPC_ENV, rpc_url, export_wallet)
 
 
-def _dbt_versions() -> str:
+def _check_target(target: Target) -> str:
+    """Reach the target without changing it; say what was found, or raise why not."""
+    if isinstance(target, DuckDBTarget) and not target.path.exists():
+        # Connecting would create the file; doctor should not change anything.
+        return f"{target.describe()} does not exist yet; run will create it"
+    if isinstance(target, MotherDuckTarget) and not any(
+        os.environ.get(name) for name in MOTHERDUCK_TOKEN_ENVS
+    ):
+        raise ConfigError("set the motherduck_token environment variable to your MotherDuck token")
+    if isinstance(target, LakeTarget):
+        return _check_lake(target)
+    with attach(target) as warehouse:
+        if isinstance(target, ClickHouseTarget):
+            version_row = warehouse.query("SELECT version()")
+            return f"{target.describe()} reachable, ClickHouse {version_row[0][0]}"
+        if isinstance(target, SnowflakeTarget):
+            version_row = warehouse.query("SELECT CURRENT_VERSION()")
+            return f"{target.describe()} reachable, Snowflake {version_row[0][0]}"
+        warehouse.query("SELECT 1")
+    return f"{target.describe()} reachable"
+
+
+def _check_lake(target: LakeTarget) -> str:
+    engine = target.engine
+    if not engine.exists() and not os.access(_existing_parent(engine), os.W_OK):
+        raise OSError(f"cannot create the lake's engine file {engine}: folder not writable")
+    engine_note = f"engine {engine}" + ("" if engine.exists() else " (created on first run)")
+    if not target.remote:
+        location = Path(target.location)
+        if not location.exists() and not os.access(_existing_parent(location), os.W_OK):
+            raise OSError(f"cannot create the lake folder {location}: folder not writable")
+        return f"{target.describe()} usable; {engine_note}"
+    connection = duckdb.connect()
+    try:
+        configure_lake(connection, target)
+        # Listing is what readers do; it needs the same credentials as writing.
+        row = connection.execute("SELECT count(*) FROM glob(?)", [target.path("**")]).fetchone()
+    finally:
+        connection.close()
+    files = int(row[0]) if row else 0
+    return f"{target.describe()} reachable, {files:,} files listed; {engine_note}"
+
+
+def _existing_parent(path: Path) -> Path:
+    path = path.resolve()
+    while not path.exists():
+        path = path.parent
+    return path
+
+
+# The dbt adapter each kind of target needs, and the extra that installs it.
+DBT_ADAPTERS = {
+    ClickHouseTarget: ("dbt-clickhouse", "clickhouse"),
+    BigQueryTarget: ("dbt-bigquery", "bigquery"),
+    SnowflakeTarget: ("dbt-snowflake", "snowflake"),
+    PostgresTarget: ("dbt-postgres", None),
+}
+
+
+def _dbt_versions(target: Target | None = None) -> str:
+    adapter, extra = DBT_ADAPTERS.get(type(target), ("dbt-duckdb", None))
+    packages = ["dbt-core", adapter] if target else ["dbt-core", "dbt-duckdb", "dbt-postgres"]
     parts = []
-    for package in ("dbt-core", "dbt-duckdb", "dbt-postgres"):
+    for package in packages:
         try:
             parts.append(f"{package} {version(package)}")
         except PackageNotFoundError:
-            parts.append(f"{package} missing")
+            install = f"; pip install 'chainstar[{extra}]'" if package == adapter and extra else ""
+            parts.append(f"{package} missing{install}")
     return ", ".join(parts)

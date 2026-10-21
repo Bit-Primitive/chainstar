@@ -6,7 +6,7 @@
 {{ config(
     materialized='incremental',
     unique_key='chain',
-    incremental_strategy='delete+insert',
+    incremental_strategy=('merge' if target.type == 'bigquery' else 'delete+insert'),
     on_schema_change='fail',
 ) }}
 
@@ -25,9 +25,9 @@ with new_blocks as (
 
 {% if is_incremental() %}
 select
-    new_blocks.chain,
+    new_blocks.chain as chain,
     coalesce(existing.first_block, new_blocks.first_block) as first_block,
-    new_blocks.last_block,
+    new_blocks.last_block as last_block,
     case
         when existing.first_date is null or existing.first_date > new_blocks.first_date
             then new_blocks.first_date

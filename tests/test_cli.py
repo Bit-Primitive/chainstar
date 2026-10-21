@@ -204,3 +204,75 @@ def test_wallet_sync_keeps_a_spreadsheet_current(tmp_path: Path, monkeypatch):
     assert "--from and --from-recent apply only to a chain's first sync" in second.output
     rows_second = len((tmp_path / "mine.csv").read_text().splitlines())
     assert rows_second > rows_first > 1
+
+
+def _doctor(tmp_path: Path, monkeypatch, target: str):
+    monkeypatch.setattr(cli, "find_cryo", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "identify_node",
+        lambda chain, url: NodeIdentity(True, "chain main, height 972,467", "bitcoin (main)", 1),
+    )
+    args = ["doctor", "--config", str(tmp_path / "none.yml"), "--chain", "bitcoin"]
+    return runner.invoke(app, [*args, "--rpc-url", "https://x.example", "--target", target])
+
+
+def test_doctor_checks_a_local_lake_without_creating_it(tmp_path: Path, monkeypatch):
+    result = _doctor(tmp_path, monkeypatch, f"parquet:{tmp_path}/lake?engine={tmp_path}/e.duckdb")
+    assert f"ok    target  parquet:{tmp_path}/lake usable; engine {tmp_path}/e.duckdb" in (
+        result.output
+    )
+    assert "dbt-duckdb" in result.output
+    assert not (tmp_path / "lake").exists() and not (tmp_path / "e.duckdb").exists()
+
+
+def test_doctor_asks_for_the_motherduck_token(tmp_path: Path, monkeypatch):
+    for name in ("motherduck_token", "MOTHERDUCK_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    result = _doctor(tmp_path, monkeypatch, "motherduck:analytics")
+    assert result.exit_code == 1
+    assert "FAIL  target  ConfigError: set the motherduck_token environment variable" in (
+        result.output
+    )
+
+
+def test_doctor_hides_a_clickhouse_password(tmp_path: Path, monkeypatch):
+    # Port 1 on localhost refuses connections.
+    result = _doctor(tmp_path, monkeypatch, "clickhouse:http://ana:hunter22secret@127.0.0.1:1")
+    assert result.exit_code == 1
+    assert "FAIL  target" in result.output
+    assert "hunter22secret" not in result.output
+    assert "dbt-clickhouse" in result.output
+
+
+def test_doctor_names_the_extra_for_a_missing_adapter(tmp_path: Path, monkeypatch):
+    real_version = cli.version
+
+    def version(package):
+        if package == "dbt-snowflake":
+            raise cli.PackageNotFoundError(package)
+        return real_version(package)
+
+    monkeypatch.setattr(cli, "version", version)
+    monkeypatch.setattr(cli, "_check_target", lambda target: "stubbed")
+    result = _doctor(tmp_path, monkeypatch, "snowflake:ana@acct/DB")
+    assert "FAIL  dbt     dbt-core" in result.output
+    assert "dbt-snowflake missing; pip install 'chainstar[snowflake]'" in result.output
+
+
+def test_errors_never_show_warehouse_credentials(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("SNOWFLAKE_PASSWORD", "sf-secret-value")
+    monkeypatch.setattr(
+        cli,
+        "export",
+        lambda target, request: (_ for _ in ()).throw(
+            RuntimeError(f"login failed for {target.user} with password {target.password}")
+        ),
+    )
+    result = runner.invoke(
+        app,
+        ["export", "--config", str(tmp_path / "none.yml"), "--target", "snowflake:ana@acct/DB"],
+    )
+    assert result.exit_code == 1
+    assert "sf-secret-value" not in result.output
+    assert "login failed for ana with password <redacted>" in result.output

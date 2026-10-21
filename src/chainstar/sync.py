@@ -47,6 +47,7 @@ from chainstar.heads import (
     describe_confirmations,
     safe_head,
 )
+from chainstar.lake import publish as publish_lake
 from chainstar.load import (
     StoredBlock,
     attach,
@@ -74,7 +75,7 @@ from chainstar.state import (
     write_state,
 )
 from chainstar.synclog import ALL_CHAINS, SyncLog, block_span, describe_counts
-from chainstar.targets import Target
+from chainstar.targets import LakeTarget, Target
 
 # Blocks per batch, in chunks. Each batch is loaded and its progress committed on
 # its own, so a long catch-up keeps what it has done if it stops half-way.
@@ -291,6 +292,8 @@ class Syncer:
         try:
             built = self.build()
             ok = built and ok
+            if built and not self.stop.requested:
+                self.publish()
             if built and after_pass is not None and not self.stop.requested:
                 after_pass()
         except Exception as failure:
@@ -532,12 +535,11 @@ class Syncer:
             fact_rows = 0
             for table in FACT_TABLES:
                 if warehouse.has_table(MART_SCHEMA, table):
-                    row = warehouse.connection.execute(
-                        f"DELETE FROM {warehouse.table(MART_SCHEMA, table)} "
-                        "WHERE chain = ? AND block_number >= ?",
+                    fact_rows += warehouse.delete(
+                        warehouse.table(MART_SCHEMA, table),
+                        "chain = ? AND block_number >= ?",
                         [chain.name, start],
-                    ).fetchone()
-                    fact_rows += int(row[0]) if row else 0
+                    )
             remaining = stored_blocks(warehouse, chain, start - 1, 1)
             checkpoint = remaining[0] if remaining else None
             new_state = replace(
@@ -615,6 +617,24 @@ class Syncer:
             tests_passed=result.tests_passed,
         )
         return True
+
+    def publish(self) -> None:
+        """A Parquet lake: copy what changed in the star schema, and the progress, to it."""
+        target = self.plan.target
+        if not isinstance(target, LakeTarget):
+            return
+        started = time.monotonic()
+        published = publish_lake(target)
+        self.log.info(
+            ALL_CHAINS,
+            "publish",
+            f"{target.describe()}: {published.describe()}",
+            seconds=time.monotonic() - started,
+            partitions_written=published.written,
+            partitions_unchanged=published.unchanged,
+            partitions_emptied=published.emptied,
+            rows=published.rows,
+        )
 
 
 def _checkpoint(from_chain: ChainBlock | None, stored: list[StoredBlock]) -> ChainBlock | None:

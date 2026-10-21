@@ -25,7 +25,7 @@ from chainstar.heads import (
     parse_confirmations,
     safe_head,
 )
-from chainstar.load import Warehouse, attach
+from chainstar.load import Warehouse, attach_reader
 from chainstar.model import MART_SCHEMA, MART_TABLES
 from chainstar.state import SyncState, read_states, utc_now
 from chainstar.targets import DuckDBTarget, Target
@@ -110,7 +110,7 @@ def _open(target: Target) -> Iterator[Warehouse]:
     while True:
         stack = ExitStack()
         try:
-            warehouse = stack.enter_context(attach(target, read_only=True))
+            warehouse = stack.enter_context(attach_reader(target, read_only=True))
         except duckdb.IOException as error:
             if "lock" not in str(error).lower() or time.monotonic() > deadline:
                 raise
@@ -126,9 +126,9 @@ def _row_counts(warehouse: Warehouse) -> dict[str, dict[str, int]]:
     for table in COUNTED_TABLES:
         counts[table] = {}
         if warehouse.has_table(MART_SCHEMA, table):
-            rows = warehouse.connection.execute(
+            rows = warehouse.query(
                 f"SELECT chain, count(*) FROM {warehouse.table(MART_SCHEMA, table)} GROUP BY chain"
-            ).fetchall()
+            )
             counts[table] = {chain: int(count) for chain, count in rows}
     return counts
 

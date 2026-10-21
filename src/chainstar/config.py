@@ -245,7 +245,15 @@ chain: ethereum
 # Where the tables are written. One of:
 #   duckdb:PATH
 #   postgres:postgresql://USER@HOST:PORT/DBNAME
-# For Postgres, leave the password out of this file and set PGPASSWORD instead.
+#   motherduck:DATABASE
+#   parquet:PATH  or  parquet:s3://BUCKET/PREFIX?endpoint=HOST:PORT   (a Parquet lake)
+#   clickhouse:http://USER@HOST:8123
+#   bigquery:PROJECT
+#   snowflake:USER@ACCOUNT/DATABASE?warehouse=WAREHOUSE&role=ROLE
+# Leave passwords, tokens and keys out of this file: chainstar reads them from the
+# environment (PGPASSWORD, motherduck_token, AWS_ACCESS_KEY_ID and
+# AWS_SECRET_ACCESS_KEY, CLICKHOUSE_PASSWORD, SNOWFLAKE_PASSWORD) or, for BigQuery,
+# from Google's application default credentials.
 # The CHAINSTAR_TARGET environment variable overrides this value.
 target: duckdb:warehouse.duckdb
 

@@ -3,9 +3,10 @@ seeds:
     description: Chains chainstar supports. Kept in step with chainstar/chains.py by a unit test.
     config:
       column_types:
-        chain_id: bigint
-        chain: varchar(32)
-        native_symbol: varchar(16)
+        # ClickHouse columns are not nullable unless declared so.
+        chain_id: "{{ 'Nullable(Int64)' if target.type == 'clickhouse' else 'bigint' }}"
+        chain: "{{ 'string' if target.type == 'bigquery' else 'varchar(32)' }}"
+        native_symbol: "{{ 'string' if target.type == 'bigquery' else 'varchar(16)' }}"
         native_decimals: integer
     columns:
       - name: chain_id

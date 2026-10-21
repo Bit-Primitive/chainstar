@@ -1,8 +1,12 @@
 """The load stage: copy extracted Parquet files into raw tables in the target warehouse.
 
-Both targets are written through DuckDB: a DuckDB file directly, and Postgres
-through DuckDB's postgres extension. One code path means the raw tables have the
-same columns and types in either warehouse.
+DuckDB, Postgres, MotherDuck and the Parquet lake's engine are written through
+DuckDB: a DuckDB file directly, Postgres through DuckDB's postgres extension,
+MotherDuck through its `md:` paths. One code path means the raw tables have the
+same columns and types in each. ClickHouse, BigQuery and Snowflake are reached
+through their own drivers (remote.py): DuckDB still reads, casts and
+de-duplicates the chunk files, and the rows are uploaded as one Parquet file per
+table with the warehouse's bulk loader.
 
 `chainstar run` replaces the chain's rows with everything currently in its data
 directory. That makes loads idempotent, lets Ethereum and Base share tables, and
@@ -15,10 +19,11 @@ by chain name.
 """
 
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import duckdb
 
@@ -35,7 +40,13 @@ from chainstar.datasets import (
     parquet_files,
     ranged_datasets_for,
 )
-from chainstar.targets import DuckDBTarget, PostgresTarget, Target
+from chainstar.targets import (
+    DuckDBTarget,
+    LakeTarget,
+    MotherDuckTarget,
+    PostgresTarget,
+    Target,
+)
 
 RAW_SCHEMA = "chainstar_raw"
 # cryo's chunk file names end in <first>_to_<last>.parquet, both ends inclusive,
@@ -48,37 +59,118 @@ class LoadError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class Param:
+    """A query parameter with its column type, for warehouses that must type a NULL."""
+
+    value: Any
+    sql_type: str
+
+
+def _plain(params: Sequence[Any]) -> list[Any]:
+    return [param.value if isinstance(param, Param) else param for param in params]
+
+
+@dataclass(frozen=True)
 class Warehouse:
-    """A DuckDB connection plus the catalog name under which the target is reachable."""
+    """A DuckDB connection plus the catalog name under which the target is reachable.
+
+    Every warehouse offers the same operations (query, delete, insert_select, ...),
+    so the load, state, sync, status and export code works on any target; the
+    remote ones in remote.py implement them with their own drivers.
+    """
 
     connection: duckdb.DuckDBPyConnection
     catalog: str
     postgres: bool = False
+    # BEGIN ... COMMIT covers several statements (see transaction()).
+    transactional = True
+    # Reachable through DuckDB, so DuckDB SQL (and read_parquet) runs against it.
+    via_duckdb = True
+    dialect = "duckdb"
+
+    @property
+    def local(self) -> duckdb.DuckDBPyConnection:
+        """The DuckDB connection that reads chunk files."""
+        return self.connection
+
+    def quote(self, name: str) -> str:
+        return _ident(name)
 
     def table(self, schema: str, name: str) -> str:
         return f"{_ident(self.catalog)}.{_ident(schema)}.{_ident(name)}"
 
     def has_table(self, schema: str, name: str) -> bool:
+        # Views too: a Parquet lake is read through views over its files.
         row = self.connection.execute(
-            "SELECT count(*) FROM duckdb_tables() "
-            "WHERE database_name = ? AND schema_name = ? AND table_name = ?",
+            "SELECT count(*) FROM (SELECT database_name, schema_name, table_name FROM "
+            "duckdb_tables() UNION ALL SELECT database_name, schema_name, view_name FROM "
+            "duckdb_views()) WHERE database_name = ? AND schema_name = ? AND table_name = ?",
             [self.catalog, schema, name],
         ).fetchone()
         return bool(row and row[0])
+
+    def query(self, sql: str, params: Sequence[Any] = ()) -> list[tuple]:
+        return self.connection.execute(sql, _plain(params)).fetchall()
+
+    def create_schema(self, schema: str) -> None:
+        self.connection.execute(
+            f"CREATE SCHEMA IF NOT EXISTS {_ident(self.catalog)}.{_ident(schema)}"
+        )
+
+    def create_table(self, schema: str, name: str, columns: Sequence[tuple[str, str]]) -> None:
+        column_ddl = ", ".join(f"{_ident(column)} {sql_type}" for column, sql_type in columns)
+        self.connection.execute(
+            f"CREATE TABLE IF NOT EXISTS {self.table(schema, name)} ({column_ddl})"
+        )
+
+    def delete(self, table: str, where: str, params: Sequence[Any]) -> int:
+        """DELETE FROM table WHERE ...; return how many rows went."""
+        row = self.connection.execute(
+            f"DELETE FROM {table} WHERE {where}", _plain(params)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def insert_select(self, schema: str, name: str, select: str, params: Sequence[Any]) -> int:
+        """INSERT the rows of a DuckDB SELECT over local files; return how many."""
+        row = self.connection.execute(
+            f"INSERT INTO {self.table(schema, name)} {select}", _plain(params)
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def begin(self) -> None:
+        self.connection.execute("BEGIN TRANSACTION")
+
+    def commit(self) -> None:
+        self.connection.execute("COMMIT")
+
+    def rollback(self) -> None:
+        self.connection.execute("ROLLBACK")
 
 
 @contextmanager
 def attach(target: Target, *, read_only: bool = False) -> Iterator[Warehouse]:
     """Open the target. read_only applies to DuckDB files, so a reader such as
     `chainstar status` never takes the file's write lock."""
-    if isinstance(target, DuckDBTarget):
-        target.path.parent.mkdir(parents=True, exist_ok=True)
+    if not isinstance(target, DuckDBTarget | PostgresTarget | MotherDuckTarget | LakeTarget):
+        # Imported here: each needs its own optional driver.
+        from chainstar.remote import attach_remote
+
+        with attach_remote(target) as warehouse:
+            yield warehouse
+        return
+    if isinstance(target, DuckDBTarget | LakeTarget):
+        path = target.path if isinstance(target, DuckDBTarget) else target.engine
+        path.parent.mkdir(parents=True, exist_ok=True)
         # Connect to the file itself rather than ATTACH it: dbt-duckdb keeps the file
         # open in this process after a build, and DuckDB refuses to attach a file
         # twice but will share an already-open database with a plain connect.
-        connection = duckdb.connect(str(target.path), read_only=read_only)
+        connection = duckdb.connect(str(path), read_only=read_only)
         catalog = connection.execute("SELECT current_database()").fetchone()[0]
-    elif isinstance(target, PostgresTarget):
+    elif isinstance(target, MotherDuckTarget):
+        # The motherduck extension reads its token from motherduck_token.
+        connection = duckdb.connect(target.path)
+        catalog = connection.execute("SELECT current_database()").fetchone()[0]
+    else:
         connection = duckdb.connect()
         try:
             connection.execute("INSTALL postgres; LOAD postgres;")
@@ -87,8 +179,6 @@ def attach(target: Target, *, read_only: bool = False) -> Iterator[Warehouse]:
             connection.close()
             raise LoadError(_without_password(str(error), target)) from None
         catalog = "warehouse"
-    else:
-        raise LoadError(f"unsupported target {target!r}")
     try:
         yield Warehouse(connection, catalog, postgres=isinstance(target, PostgresTarget))
     except duckdb.Error as error:
@@ -98,6 +188,23 @@ def attach(target: Target, *, read_only: bool = False) -> Iterator[Warehouse]:
     finally:
         # Close before dbt runs: DuckDB allows only one writer per database file.
         connection.close()
+
+
+@contextmanager
+def attach_reader(target: Target, *, read_only: bool = True) -> Iterator[Warehouse]:
+    """Open the target for reading the star schema and progress (status, export).
+
+    A Parquet lake is read from its published files, so this works on any machine
+    that can reach the lake, without the engine file that builds it.
+    """
+    if isinstance(target, LakeTarget):
+        from chainstar.lake import open_published
+
+        with open_published(target) as warehouse:
+            yield warehouse
+        return
+    with attach(target, read_only=read_only) as warehouse:
+        yield warehouse
 
 
 def _without_password(message: str, target: PostgresTarget) -> str:
@@ -125,11 +232,9 @@ def prepare_raw(warehouse: Warehouse) -> None:
     Every raw table exists after any load, so the dbt sources for chains not
     loaded yet resolve to empty tables.
     """
-    warehouse.connection.execute(
-        f"CREATE SCHEMA IF NOT EXISTS {_ident(warehouse.catalog)}.{_ident(RAW_SCHEMA)}"
-    )
+    warehouse.create_schema(RAW_SCHEMA)
     for dataset in ALL_DATASETS:
-        _create_table(warehouse, dataset)
+        warehouse.create_table(RAW_SCHEMA, dataset.name, dataset.columns)
 
 
 def index_raw_tables(warehouse: Warehouse) -> None:
@@ -137,7 +242,9 @@ def index_raw_tables(warehouse: Warehouse) -> None:
 
     A sync reads, replaces and rolls back block ranges; without these indexes each
     of those would scan the whole table. DuckDB needs none: it skips row groups by
-    their min/max statistics, and an index there would slow every insert.
+    their min/max statistics, and an index there would slow every insert. The
+    other warehouses order or cluster their raw tables by chain and block instead
+    (see remote.py).
     """
     if not warehouse.postgres:
         return
@@ -153,14 +260,22 @@ def index_raw_tables(warehouse: Warehouse) -> None:
 
 @contextmanager
 def transaction(warehouse: Warehouse) -> Iterator[None]:
-    """Commit everything in the block together, or nothing (also on Ctrl-C)."""
-    warehouse.connection.execute("BEGIN TRANSACTION")
+    """Commit everything in the block together, or nothing (also on Ctrl-C).
+
+    On a warehouse without multi-statement transactions (ClickHouse, BigQuery) the
+    statements run one by one, in an order that a repeated sync repairs: data
+    first, progress last (see state.py).
+    """
+    if not warehouse.transactional:
+        yield
+        return
+    warehouse.begin()
     try:
         yield
     except BaseException:
-        warehouse.connection.execute("ROLLBACK")
+        warehouse.rollback()
         raise
-    warehouse.connection.execute("COMMIT")
+    warehouse.commit()
 
 
 def chunk_span(path: Path) -> tuple[int, int] | None:
@@ -194,38 +309,41 @@ def load_range(
     is not tied to blocks and is small, so it is replaced in full. Returns the
     rows now in the range per dataset (metadata: all of the chain's).
     """
-    connection = warehouse.connection
     column, value = _identity(chain)
+    quote = warehouse.quote
     counts: dict[str, int] = {}
     for dataset in ranged_datasets_for(chain):
         table = warehouse.table(RAW_SCHEMA, dataset.name)
-        block = _ident(dataset.block_column)
-        connection.execute(
-            f"DELETE FROM {table} WHERE {_ident(column)} = ? AND {block} >= ? AND {block} < ?",
+        block = quote(dataset.block_column)
+        warehouse.delete(
+            table,
+            f"{quote(column)} = ? AND {block} >= ? AND {block} < ?",
             [value, blocks.start, blocks.end],
         )
         files = overlapping_files(data_dir, chain, dataset, blocks.start, blocks.end - 1)
         counts[dataset.name] = 0
         if files:
-            _check_identity(connection, dataset, files, chain)
-            row = connection.execute(
-                f"INSERT INTO {table} {_select_distinct(dataset)} "
-                f"WHERE {block} >= ? AND {block} < ?",
+            _check_identity(warehouse.local, dataset, files, chain)
+            local_block = _ident(dataset.block_column)
+            counts[dataset.name] = warehouse.insert_select(
+                RAW_SCHEMA,
+                dataset.name,
+                f"{_select_distinct(dataset)} WHERE {local_block} >= ? AND {local_block} < ?",
                 [[str(f) for f in files], blocks.start, blocks.end],
-            ).fetchone()
-            counts[dataset.name] = int(row[0]) if row else 0
+            )
     if chain.family == EVM:
         table = warehouse.table(RAW_SCHEMA, ERC20_METADATA.name)
         files = parquet_files(data_dir, chain.name, ERC20_METADATA)
-        connection.execute(f"DELETE FROM {table} WHERE {_ident(column)} = ?", [value])
+        warehouse.delete(table, f"{quote(column)} = ?", [value])
         counts[ERC20_METADATA.name] = 0
         if files:
-            _check_identity(connection, ERC20_METADATA, files, chain)
-            row = connection.execute(
-                f"INSERT INTO {table} {_select_distinct(ERC20_METADATA)}",
+            _check_identity(warehouse.local, ERC20_METADATA, files, chain)
+            counts[ERC20_METADATA.name] = warehouse.insert_select(
+                RAW_SCHEMA,
+                ERC20_METADATA.name,
+                _select_distinct(ERC20_METADATA),
                 [[str(f) for f in files]],
-            ).fetchone()
-            counts[ERC20_METADATA.name] = int(row[0]) if row else 0
+            )
     return counts
 
 
@@ -237,12 +355,11 @@ def delete_from_block(warehouse: Warehouse, chain: Chain, first_block: int) -> i
     column, value = _identity(chain)
     deleted = 0
     for dataset in ranged_datasets_for(chain):
-        row = warehouse.connection.execute(
-            f"DELETE FROM {warehouse.table(RAW_SCHEMA, dataset.name)} "
-            f"WHERE {_ident(column)} = ? AND {_ident(dataset.block_column)} >= ?",
+        deleted += warehouse.delete(
+            warehouse.table(RAW_SCHEMA, dataset.name),
+            f"{warehouse.quote(column)} = ? AND {warehouse.quote(dataset.block_column)} >= ?",
             [value, first_block],
-        ).fetchone()
-        deleted += int(row[0]) if row else 0
+        )
     return deleted
 
 
@@ -260,13 +377,14 @@ def stored_blocks(
     """The chain's newest raw blocks at or below a block, newest first."""
     dataset = blocks_dataset(chain)
     column, value = _identity(chain)
-    number = _ident(dataset.block_column)
-    rows = warehouse.connection.execute(
-        f"SELECT {number}, block_hash, {_ident(BLOCK_TIME_COLUMN[chain.family])} "
+    quote = warehouse.quote
+    number = quote(dataset.block_column)
+    rows = warehouse.query(
+        f"SELECT {number}, {quote('block_hash')}, {quote(BLOCK_TIME_COLUMN[chain.family])} "
         f"FROM {warehouse.table(RAW_SCHEMA, dataset.name)} "
-        f"WHERE {_ident(column)} = ? AND {number} <= ? ORDER BY {number} DESC LIMIT ?",
+        f"WHERE {quote(column)} = ? AND {number} <= ? ORDER BY {number} DESC LIMIT ?",
         [value, at_or_below, limit],
-    ).fetchall()
+    )
     return [StoredBlock(int(n), str(h), None if t is None else int(t)) for n, h, t in rows]
 
 
@@ -290,13 +408,6 @@ def held_ranges(data_dir: Path, chain: Chain) -> list[tuple[int, int]]:
     return merged
 
 
-def _create_table(warehouse: Warehouse, dataset: Dataset) -> None:
-    column_ddl = ", ".join(f"{_ident(name)} {sql_type}" for name, sql_type in dataset.columns)
-    warehouse.connection.execute(
-        f"CREATE TABLE IF NOT EXISTS {warehouse.table(RAW_SCHEMA, dataset.name)} ({column_ddl})"
-    )
-
-
 def _identity(chain: Chain) -> tuple[str, int | str]:
     """The raw column and value that mark a row as belonging to `chain`."""
     if chain.chain_id is not None:
@@ -305,27 +416,21 @@ def _identity(chain: Chain) -> tuple[str, int | str]:
 
 
 def _load_dataset(warehouse: Warehouse, dataset: Dataset, files: list[Path], chain: Chain) -> int:
-    connection = warehouse.connection
     table = warehouse.table(RAW_SCHEMA, dataset.name)
     column, value = _identity(chain)
     if files:
-        _check_identity(connection, dataset, files, chain)
+        _check_identity(warehouse.local, dataset, files, chain)
 
-    connection.execute("BEGIN TRANSACTION")
-    try:
-        connection.execute(f"DELETE FROM {table} WHERE {_ident(column)} = ?", [value])
+    with transaction(warehouse):
+        warehouse.delete(table, f"{warehouse.quote(column)} = ?", [value])
         if files:
-            connection.execute(
-                f"INSERT INTO {table} {_select_distinct(dataset)}", [[str(f) for f in files]]
+            warehouse.insert_select(
+                RAW_SCHEMA, dataset.name, _select_distinct(dataset), [[str(f) for f in files]]
             )
-        connection.execute("COMMIT")
-    except Exception:
-        connection.execute("ROLLBACK")
-        raise
-    row = connection.execute(
-        f"SELECT count(*) FROM {table} WHERE {_ident(column)} = ?", [value]
-    ).fetchone()
-    return int(row[0]) if row else 0
+    row = warehouse.query(
+        f"SELECT count(*) FROM {table} WHERE {warehouse.quote(column)} = ?", [value]
+    )
+    return int(row[0][0]) if row else 0
 
 
 def _select_distinct(dataset: Dataset) -> str:
@@ -335,7 +440,8 @@ def _select_distinct(dataset: Dataset) -> str:
     fails loudly here instead of drifting downstream.
     """
     select_list = ", ".join(
-        f"CAST({_ident(name)} AS {sql_type})" for name, sql_type in dataset.columns
+        f"CAST({_ident(name)} AS {sql_type}) AS {_ident(name)}"
+        for name, sql_type in dataset.columns
     )
     return f"SELECT DISTINCT {select_list} FROM read_parquet(?)"
 
@@ -369,10 +475,8 @@ def table_row_counts(target: Target, schema: str, tables: list[str]) -> dict[str
     counts: dict[str, int] = {}
     with attach(target) as warehouse:
         for table in tables:
-            row = warehouse.connection.execute(
-                f"SELECT count(*) FROM {warehouse.table(schema, table)}"
-            ).fetchone()
-            counts[table] = int(row[0]) if row else 0
+            row = warehouse.query(f"SELECT count(*) FROM {warehouse.table(schema, table)}")
+            counts[table] = int(row[0][0]) if row else 0
     return counts
 
 

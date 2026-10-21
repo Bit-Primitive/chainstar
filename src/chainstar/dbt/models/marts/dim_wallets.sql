@@ -64,10 +64,11 @@ blocks as (
 
 select
     {{ chainstar.chain_key('new_wallets.chain', 'new_wallets.address') }} as wallet_id,
-    new_wallets.chain,
-    new_wallets.address,
+    new_wallets.chain as chain,
+    new_wallets.address as address,
     -- The EVM zero address stands for mints (as sender) and burns (as recipient).
-    new_wallets.address = '0x0000000000000000000000000000000000000000' as is_zero_address,
+    cast(new_wallets.address = '0x0000000000000000000000000000000000000000' as {{ chainstar.type_boolean() }})
+        as is_zero_address,
 {% if is_incremental() %}
     -- New rows are all above the watermark, so a wallet already here keeps its
     -- first appearance and adds the new counts to its old ones.
@@ -79,20 +80,20 @@ select
         when existing.wallet_id is null then first_block.block_timestamp
         else existing.first_seen_at
     end as first_seen_at,
-    new_wallets.last_seen_block,
+    new_wallets.last_seen_block as last_seen_block,
     last_block.block_timestamp as last_seen_at,
     cast(coalesce(existing.transfers_out, 0) + new_wallets.transfers_out as bigint) as transfers_out,
     cast(coalesce(existing.transfers_in, 0) + new_wallets.transfers_in as bigint) as transfers_in,
     cast(coalesce(existing.transactions_sent, 0) + new_wallets.transactions_sent as bigint)
         as transactions_sent
 {% else %}
-    new_wallets.first_seen_block,
+    new_wallets.first_seen_block as first_seen_block,
     first_block.block_timestamp as first_seen_at,
-    new_wallets.last_seen_block,
+    new_wallets.last_seen_block as last_seen_block,
     last_block.block_timestamp as last_seen_at,
-    new_wallets.transfers_out,
-    new_wallets.transfers_in,
-    new_wallets.transactions_sent
+    new_wallets.transfers_out as transfers_out,
+    new_wallets.transfers_in as transfers_in,
+    new_wallets.transactions_sent as transactions_sent
 {% endif %}
 from new_wallets
 left join blocks as first_block

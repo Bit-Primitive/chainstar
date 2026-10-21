@@ -8,6 +8,57 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Added
 
+- More targets. Each works with `run`, `sync` (progress, reorganisation rollbacks and
+  incremental builds), `status` and `export`; see the README's Targets table for what was
+  tested how.
+  - **Parquet data lake**, `--target parquet:PATH` or `parquet:s3://BUCKET/PREFIX` (AWS S3,
+    Cloudflare R2, MinIO and other S3-compatible storage, with `?endpoint=`). The star
+    schema is built in a local DuckDB file (`?engine=`, default `lake-engine.duckdb`)
+    exactly as for a DuckDB target, then published as Hive-partitioned Parquet: facts by
+    `chain` and `date_day`, dimensions by `chain`, plus `chainstar_state/sync_progress`.
+    Publishing rewrites only partitions whose rows changed (a manifest in
+    `_chainstar/published.parquet` keeps each partition's row count and hash) and empties
+    partitions that are gone. `status` and `export` read the lake itself, so they work
+    without the engine file. S3 keys come from `AWS_ACCESS_KEY_ID` and
+    `AWS_SECRET_ACCESS_KEY`, else the AWS credential chain.
+  - **ClickHouse**, `--target clickhouse:http://USER@HOST:8123` (or `https://`), password
+    in `CLICKHOUSE_PASSWORD`. Raw rows are loaded as Parquet (`INSERT ... FORMAT
+    Parquet`); dbt-clickhouse builds the tables with `delete+insert` on lightweight
+    deletes. ClickHouse has no multi-statement transactions, so a sync writes its
+    progress last, as a new version of the row, and a sync that stopped half-way loads
+    the same blocks again on the next run.
+  - **MotherDuck**, `--target motherduck:DB` or `duckdb:md:DB`, token in
+    `motherduck_token`.
+  - **BigQuery**, `--target bigquery:PROJECT[?location=EU]`, with Application Default
+    Credentials. Raw rows are loaded with Parquet load jobs; dbt-bigquery's `merge` on
+    each table's key. Progress is versioned as on ClickHouse.
+  - **Snowflake**, `--target snowflake:USER@ACCOUNT/DATABASE?warehouse=WH&role=ROLE`,
+    password in `SNOWFLAKE_PASSWORD` or a key pair in `SNOWFLAKE_PRIVATE_KEY_PATH`
+    (and `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`), or `&authenticator=externalbrowser`. Raw
+    rows go through the table stage (PUT, then COPY INTO from Parquet) inside the
+    batch's transaction.
+- Optional extras for the drivers: `chainstar[clickhouse]`, `chainstar[bigquery]`,
+  `chainstar[snowflake]`, `chainstar[all]`. The base install is unchanged; the Docker
+  image includes every extra, and DuckDB's `httpfs`, `aws` and `motherduck` extensions.
+- `chainstar doctor` checks the target for each kind: ClickHouse and Snowflake versions, a
+  lake's folder or bucket listing and its engine file, the MotherDuck token, and the dbt
+  adapter the target needs, naming the extra to install when it is missing.
+- A `publish` step in sync logs and in `run`'s summary for Parquet lakes.
+- Passwords, tokens and keys of every target (from the URL or the environment) are
+  removed from errors, `--debug` tracebacks, `doctor` and sync log warnings and errors.
+- CI runs the ClickHouse, S3 and BigQuery-SQL tests against
+  `clickhouse/clickhouse-server:25.8`, `adobe/s3mock:5.2.3` and
+  `ghcr.io/goccy/bigquery-emulator:0.8.1`, and installs every extra.
+
+### Changed
+
+- The dbt models are written for all seven targets: the SQL that differs (type names,
+  Unix times, date parts and series, a quoted column) goes through dispatched macros, and
+  qualified columns carry explicit names. On DuckDB and Postgres the tables, their
+  columns and types are as before.
+- `uv.lock` now resolves certifi to 2025.1.31: every dbt-snowflake release requires
+  `certifi<2025.4.26`. chainstar's own RPC requests use the system's certificates.
+
 - `chainstar sync`: keeps a warehouse up to date. Each run continues from where the
   last stopped, for one or more chains (`--chain`, repeatable; default `chains` in
   `chainstar.yml`, else the chains already synced), up to a safe head, then exits; with

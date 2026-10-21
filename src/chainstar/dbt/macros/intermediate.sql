@@ -42,7 +42,7 @@ select
     case
         when count(distinct address) = 1 and count(*) = count(address) then min(address)
     end as sole_input_address,
-    cast(sum(value_sat) as decimal(38, 0)) as input_value_sat
+    cast(sum(value_sat) as {{ chainstar.type_decimal(38, 0) }}) as input_value_sat
 from {{ ref('stg_bitcoin_inputs') }}
 where {{ chainstar.after_watermark(marks, 'bitcoin') }}
 group by chain, block_number, transaction_hash
@@ -61,15 +61,15 @@ select
     block_number,
     transaction_hash,
     transaction_index,
-    cast(log_index as varchar) as transfer_position,
+    cast(log_index as {{ chainstar.type_text() }}) as transfer_position,
     log_index,
     token_address,
     from_address,
     to_address,
     cast(null as bigint) as input_address_count,
-    cast(null as varchar) as from_token_account,
-    cast(null as varchar) as to_token_account,
-    cast(null as varchar) as script_type,
+    cast(null as {{ chainstar.type_text() }}) as from_token_account,
+    cast(null as {{ chainstar.type_text() }}) as to_token_account,
+    cast(null as {{ chainstar.type_text() }}) as script_type,
     amount_raw
 from {{ ref('stg_erc20_transfers') }}
 where {{ chainstar.after_watermark(marks, 'evm') }}
@@ -80,20 +80,20 @@ union all
 -- when the transaction has a single sender (see int_bitcoin_senders); the
 -- coinbase spends nothing, so its input_address_count is 0.
 select
-    outputs.chain,
-    outputs.block_number,
-    outputs.transaction_hash,
-    outputs.transaction_index,
-    cast(outputs.output_index as varchar),
+    outputs.chain as chain,
+    outputs.block_number as block_number,
+    outputs.transaction_hash as transaction_hash,
+    outputs.transaction_index as transaction_index,
+    cast(outputs.output_index as {{ chainstar.type_text() }}),
     cast(null as bigint),
     'native',
-    senders.sole_input_address,
-    outputs.address,
+    senders.sole_input_address as sole_input_address,
+    outputs.address as address,
     coalesce(senders.input_address_count, 0),
-    cast(null as varchar),
-    cast(null as varchar),
-    outputs.script_type,
-    cast(outputs.value_sat as varchar)
+    cast(null as {{ chainstar.type_text() }}),
+    cast(null as {{ chainstar.type_text() }}),
+    outputs.script_type as script_type,
+    cast(outputs.value_sat as {{ chainstar.type_text() }})
 from {{ ref('stg_bitcoin_outputs') }} as outputs
 left join ({{ chainstar.int_bitcoin_senders(marks) }}) as senders
     on senders.chain = outputs.chain
@@ -119,7 +119,7 @@ select
     cast(null as bigint),
     case when program <> 'system' then source end,
     case when program <> 'system' then destination end,
-    cast(null as varchar),
+    cast(null as {{ chainstar.type_text() }}),
     amount_raw
 from {{ ref('stg_solana_transfers') }}
 where success and {{ chainstar.after_watermark(marks, 'solana', 'slot') }}
@@ -135,21 +135,21 @@ where success and {{ chainstar.after_watermark(marks, 'solana', 'slot') }}
 -- separate blob fee and Base's L1 data fee; cryo extracts neither.
 with evm as (
     select
-        txs.chain,
-        txs.block_number,
-        txs.transaction_hash,
-        txs.transaction_index,
-        txs.from_address,
-        txs.to_address,
-        txs.transaction_type,
-        txs.success,
-        txs.gas_limit,
-        txs.gas_used,
-        txs.effective_gas_price_wei,
+        txs.chain as chain,
+        txs.block_number as block_number,
+        txs.transaction_hash as transaction_hash,
+        txs.transaction_index as transaction_index,
+        txs.from_address as from_address,
+        txs.to_address as to_address,
+        txs.transaction_type as transaction_type,
+        txs.success as success,
+        txs.gas_limit as gas_limit,
+        txs.gas_used as gas_used,
+        txs.effective_gas_price_wei as effective_gas_price_wei,
         blocks.base_fee_per_gas as base_fee_per_gas_wei,
         cast(
-            cast(txs.gas_used as decimal(38, 0)) * cast(txs.effective_gas_price_wei as decimal(38, 0))
-            as decimal(38, 0)
+            cast(txs.gas_used as {{ chainstar.type_decimal(38, 0) }}) * cast(txs.effective_gas_price_wei as {{ chainstar.type_decimal(38, 0) }})
+            as {{ chainstar.type_decimal(38, 0) }}
         ) as execution_fee_wei
     from {{ ref('stg_transactions') }} as txs
     left join (
@@ -166,7 +166,7 @@ bitcoin_output_values as (
         chain,
         block_number,
         transaction_hash,
-        cast(sum(value_sat) as decimal(38, 0)) as output_value_sat
+        cast(sum(value_sat) as {{ chainstar.type_decimal(38, 0) }}) as output_value_sat
     from {{ ref('stg_bitcoin_outputs') }}
     where {{ chainstar.after_watermark(marks, 'bitcoin') }}
     group by chain, block_number, transaction_hash
@@ -181,7 +181,7 @@ select
     to_address,
     transaction_type,
     success,
-    cast(null as boolean) as is_vote,
+    cast(null as {{ chainstar.type_boolean() }}) as is_vote,
     gas_limit,
     gas_used,
     effective_gas_price_wei,
@@ -196,21 +196,21 @@ union all
 -- coinbase pays no fee and is left out. The payer is known only when a single
 -- address funded the transaction.
 select
-    txs.chain,
-    txs.block_number,
-    txs.transaction_hash,
-    txs.transaction_index,
-    senders.sole_input_address,
-    cast(null as varchar),
+    txs.chain as chain,
+    txs.block_number as block_number,
+    txs.transaction_hash as transaction_hash,
+    txs.transaction_index as transaction_index,
+    senders.sole_input_address as sole_input_address,
+    cast(null as {{ chainstar.type_text() }}),
     cast(null as bigint),
     true,
-    cast(null as boolean),
+    cast(null as {{ chainstar.type_boolean() }}),
     cast(null as bigint),
     cast(null as bigint),
-    cast(null as decimal(20, 0)),
-    cast(null as decimal(20, 0)),
-    cast(null as decimal(38, 0)),
-    cast(senders.input_value_sat - outputs.output_value_sat as decimal(38, 0))
+    cast(null as {{ chainstar.type_decimal(20, 0) }}),
+    cast(null as {{ chainstar.type_decimal(20, 0) }}),
+    cast(null as {{ chainstar.type_decimal(38, 0) }}),
+    cast(senders.input_value_sat - outputs.output_value_sat as {{ chainstar.type_decimal(38, 0) }})
 from {{ ref('stg_bitcoin_transactions') }} as txs
 left join ({{ chainstar.int_bitcoin_senders(marks) }}) as senders
     on senders.chain = txs.chain
@@ -233,16 +233,16 @@ select
     signature,
     transaction_index,
     fee_payer,
-    cast(null as varchar),
+    cast(null as {{ chainstar.type_text() }}),
     cast(null as bigint),
     success,
     is_vote,
     cast(null as bigint),
     cast(null as bigint),
-    cast(null as decimal(20, 0)),
-    cast(null as decimal(20, 0)),
-    cast(null as decimal(38, 0)),
-    cast(fee_lamports as decimal(38, 0))
+    cast(null as {{ chainstar.type_decimal(20, 0) }}),
+    cast(null as {{ chainstar.type_decimal(20, 0) }}),
+    cast(null as {{ chainstar.type_decimal(38, 0) }}),
+    cast(fee_lamports as {{ chainstar.type_decimal(38, 0) }})
 from {{ ref('stg_solana_transactions') }}
 where {{ chainstar.after_watermark(marks, 'solana', 'slot') }}
 {% endmacro %}
@@ -298,15 +298,15 @@ native_assets as (
 )
 
 select
-    evm_tokens.chain,
-    evm_tokens.token_address,
+    evm_tokens.chain as chain,
+    evm_tokens.token_address as token_address,
     'erc20' as token_standard,
-    metadata.name,
-    metadata.symbol,
-    metadata.decimals,
-    metadata.metadata_block_number,
-    evm_tokens.first_seen_block,
-    evm_tokens.last_seen_block
+    metadata.name as name,
+    metadata.symbol as symbol,
+    metadata.decimals as decimals,
+    metadata.metadata_block_number as metadata_block_number,
+    evm_tokens.first_seen_block as first_seen_block,
+    evm_tokens.last_seen_block as last_seen_block
 from evm_tokens
 left join {{ ref('stg_erc20_metadata') }} as metadata
     on metadata.chain = evm_tokens.chain
@@ -318,8 +318,8 @@ select
     chain,
     token_address,
     token_standard,
-    cast(null as varchar),
-    cast(null as varchar),
+    cast(null as {{ chainstar.type_text() }}),
+    cast(null as {{ chainstar.type_text() }}),
     decimals,
     cast(null as bigint),
     first_seen_block,
@@ -330,15 +330,15 @@ union all
 
 -- Under the token address 'native'.
 select
-    native_assets.chain,
+    native_assets.chain as chain,
     'native',
     'native',
-    cast(null as varchar),
-    chains.native_symbol,
+    cast(null as {{ chainstar.type_text() }}),
+    chains.native_symbol as native_symbol,
     cast(chains.native_decimals as bigint),
     cast(null as bigint),
-    native_assets.first_seen_block,
-    native_assets.last_seen_block
+    native_assets.first_seen_block as first_seen_block,
+    native_assets.last_seen_block as last_seen_block
 from native_assets
 inner join {{ ref('chains') }} as chains
     on chains.chain = native_assets.chain

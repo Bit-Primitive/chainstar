@@ -12,16 +12,27 @@
 FROM rust:1.97.1-slim-bookworm AS cryo
 RUN cargo install cryo_cli --version 0.3.2
 
-# Stage 2: chainstar and its Python dependencies, pinned by uv.lock.
+# Stage 2: chainstar and its Python dependencies, pinned by uv.lock. The published
+# image includes ClickHouse (DuckDB, Postgres, MotherDuck and the Parquet lake need no
+# extra), which keeps it under 1 GB for everyone who just wants to try chainstar. For
+# BigQuery or Snowflake build your own, which adds about 800 MB:
+#   docker build --build-arg EXTRAS="all" .     (or "bigquery", "snowflake", "")
 FROM python:3.13-slim-bookworm AS venv
+ARG EXTRAS="clickhouse"
 COPY --from=ghcr.io/astral-sh/uv:0.11.24 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/chainstar
 WORKDIR /src
 COPY pyproject.toml uv.lock README.md LICENSE ./
 # Dependencies first, so editing chainstar's code does not reinstall dbt.
-RUN uv sync --locked --no-dev --no-install-project
+RUN uv sync --locked --no-dev $(for extra in $EXTRAS; do echo --extra "$extra"; done) \
+        --no-install-project
 COPY src ./src
-RUN uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-dev $(for extra in $EXTRAS; do echo --extra "$extra"; done) \
+        --no-editable
+# uv.lock pins certifi to 2025.1.31 only because dbt-snowflake requires
+# certifi<2025.4.26. An image without Snowflake gets the current CA bundle.
+RUN case " $EXTRAS " in *" snowflake "*|*" all "*) ;; \
+      *) uv pip install --python /opt/chainstar/bin/python --upgrade certifi ;; esac
 
 # Stage 3: the runtime image, without compilers or uv.
 FROM python:3.13-slim-bookworm
@@ -38,9 +49,10 @@ ENV PATH=/opt/chainstar/bin:$PATH \
 RUN useradd --uid 1000 --create-home chainstar \
     && mkdir /work && chown chainstar:chainstar /work
 USER chainstar
-# DuckDB downloads extensions on first use; bake in the two chainstar uses
-# (postgres targets, Excel export) so the image works without that download.
-RUN python -c "import duckdb; duckdb.connect().execute('INSTALL postgres; INSTALL excel')" \
+# DuckDB downloads extensions on first use; bake in the ones chainstar uses
+# (postgres targets, Excel export, s3:// lakes and the AWS credential chain,
+# MotherDuck) so the image works without that download.
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL postgres; INSTALL excel; INSTALL httpfs; INSTALL aws; INSTALL motherduck')" \
     && chmod -R a+rX /home/chainstar
 WORKDIR /work
 ENTRYPOINT ["chainstar"]

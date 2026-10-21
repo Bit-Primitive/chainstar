@@ -34,11 +34,36 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U chainstar -d chainstar_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        env:
+          CLICKHOUSE_USER: chainstar
+          CLICKHOUSE_PASSWORD: chainstar
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["8123:8123"]
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --user chainstar --password chainstar -q 'SELECT 1'"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      # S3-compatible storage for the Parquet lake tests, with the bucket made at start.
+      s3:
+        image: adobe/s3mock:5.2.3
+        env:
+          COM_ADOBE_TESTING_S3MOCK_STORE_INITIAL_BUCKETS: chainstar-test
+        ports: ["9090:9090"]
     env:
       CHAINSTAR_TEST_POSTGRES_DSN: postgresql://chainstar:chainstar@127.0.0.1:5432/chainstar_test
+      CHAINSTAR_TEST_CLICKHOUSE_URL: http://chainstar:chainstar@127.0.0.1:8123
+      CHAINSTAR_TEST_S3_ENDPOINT: http://127.0.0.1:9090
+      CHAINSTAR_TEST_S3_BUCKET: chainstar-test
+      CHAINSTAR_TEST_BIGQUERY_EMULATOR: http://127.0.0.1:9050
     steps:
+      # Not a service container: the emulator needs a --project argument, and the same
+      # port on the host as inside, because it hands out upload URLs with its own port.
+      - run: docker run -d -p 9050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=chainstar-test
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --python ${{ matrix.python }}
+      # Every extra, so the BigQuery and Snowflake compile tests run too.
+      - run: uv sync --python ${{ matrix.python }} --all-extras
       # Tests use Parquet fixtures, so they need neither cryo nor an RPC endpoint.
       - run: uv run pytest -v

@@ -6,7 +6,8 @@ Readable lines suit a terminal and journald:
 
 With --json-logs each line is one JSON object with the same facts as fields
 (time, level, chain, stage, message, seconds, and per-stage counts), for log
-shippers and monitoring. Every message passes through RPC URL redaction.
+shippers and monitoring. Every message passes through RPC URL redaction, and
+warnings and errors are also cleared of warehouse passwords, tokens and keys.
 """
 
 import json
@@ -14,7 +15,8 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
-from chainstar.redact import redact_text
+from chainstar.redact import redact_text, redact_values
+from chainstar.targets import credential_secrets
 
 Write = Callable[[str], None]
 # For lines that concern every chain, such as the dbt build.
@@ -40,7 +42,8 @@ class SyncLog:
         self._clock = clock
 
     def redact(self, text: str) -> str:
-        return redact_text(text, self._secrets)
+        """RPC URLs, and warehouse credentials, which only a failure could show."""
+        return redact_values(redact_text(text, self._secrets), credential_secrets())
 
     def info(self, chain: str, stage: str, message: str, **fields: Any) -> None:
         self._event("info", chain, stage, message, fields)
@@ -54,7 +57,11 @@ class SyncLog:
     def _event(
         self, level: str, chain: str, stage: str, message: str, fields: dict[str, Any]
     ) -> None:
-        message = self.redact(message)
+        # chainstar's own messages never contain a credential, so only warnings and
+        # errors, which can quote a driver, are scrubbed of them; a password that is
+        # also an ordinary word then never blanks that word out of every line.
+        scrub = (lambda text: redact_text(text, self._secrets)) if level == "info" else self.redact
+        message = scrub(message)
         seconds = fields.pop("seconds", None)
         if self._json:
             record = {"time": self._clock(), "level": level, "chain": chain, "stage": stage}

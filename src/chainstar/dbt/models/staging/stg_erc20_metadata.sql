@@ -11,12 +11,12 @@ with ranked as (
 )
 
 select
-    chains.chain,
-    ranked.chain_id,
+    chains.chain as chain,
+    ranked.chain_id as chain_id,
     ranked.erc20 as token_address,
     nullif(ranked.name, '') as name,
     nullif(ranked.symbol, '') as symbol,
-    ranked.decimals,
+    ranked.decimals as decimals,
     ranked.block_number as metadata_block_number
 from ranked
 inner join {{ ref('chains') }} as chains

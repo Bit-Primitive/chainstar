@@ -1,7 +1,9 @@
 """`chainstar export`: star-schema tables to CSV, Excel or Parquet files.
 
-Exports run through DuckDB for both targets, as loads do, so one query works on a
-DuckDB file and on Postgres. Excel files are written by DuckDB's `excel`
+Exports run through DuckDB, as loads do, so one query works on a DuckDB file,
+Postgres and MotherDuck. A Parquet lake is read from its published files. On
+ClickHouse, BigQuery and Snowflake the warehouse applies the filters and DuckDB
+sorts and writes the rows it returns. Excel files are written by DuckDB's `excel`
 extension, which DuckDB downloads from its extension repository the first time,
 like the `postgres` extension; no extra Python package is needed.
 
@@ -15,7 +17,7 @@ from pathlib import Path
 
 import duckdb
 
-from chainstar.load import attach
+from chainstar.load import attach_reader
 from chainstar.model import MART_SCHEMA, MART_TABLES
 from chainstar.targets import DuckDBTarget, Target
 
@@ -96,9 +98,13 @@ def export(target: Target, request: ExportRequest) -> int:
             "`chainstar run` first, or point --target at your warehouse"
         )
     request.output.parent.mkdir(parents=True, exist_ok=True)
-    with attach(target) as warehouse:
-        connection = warehouse.connection
-        query, params = build_query(warehouse.table, request)
+    with attach_reader(target, read_only=False) as warehouse:
+        if warehouse.via_duckdb:
+            connection = warehouse.connection
+            query, params = build_query(warehouse.table, request)
+        else:
+            connection = warehouse.local
+            query, params = _fetched_query(warehouse, request)
         try:
             if request.format == "xlsx":
                 _check_excel_size(connection, query, params)
@@ -113,11 +119,27 @@ def export(target: Target, request: ExportRequest) -> int:
             )
             row = connection.execute(f"SELECT count(*) FROM ({query})", params).fetchone()
         except duckdb.CatalogException:
-            raise ExportError(
-                f"the warehouse {target.describe()} has no star-schema tables yet; "
-                "run `chainstar quickstart` or `chainstar run` first"
-            ) from None
+            raise ExportError(_no_tables(target)) from None
     return int(row[0]) if row else 0
+
+
+def _no_tables(target: Target) -> str:
+    return (
+        f"the warehouse {target.describe()} has no star-schema tables yet; "
+        "run `chainstar quickstart` or `chainstar run` first"
+    )
+
+
+@dataclass(frozen=True)
+class QueryParts:
+    # SELECT of the table's rows, as the warehouse runs it.
+    source: str
+    conditions: list[str]
+    params: list
+    # Applied by DuckDB: the columns to keep and the order.
+    columns: str
+    order: str
+    limit: int | None
 
 
 def build_query(table_name, request: ExportRequest) -> tuple[str, list]:
@@ -125,6 +147,21 @@ def build_query(table_name, request: ExportRequest) -> tuple[str, list]:
 
     `table_name(schema, name)` returns the quoted table reference for the target.
     """
+    parts = query_parts(table_name, request)
+    query = f"SELECT {parts.columns} FROM ({parts.source}) AS rows"
+    if parts.conditions:
+        query += " WHERE " + " AND ".join(parts.conditions)
+    return query + _order_and_limit(parts), parts.params
+
+
+def _order_and_limit(parts: QueryParts) -> str:
+    clause = f" ORDER BY {parts.order}"
+    if parts.limit is not None:
+        clause += f" LIMIT {int(parts.limit)}"
+    return clause
+
+
+def query_parts(table_name, request: ExportRequest) -> QueryParts:
     filters = TABLE_FILTERS[request.table]
     if request.table == TRANSFERS_VIEW:
         transfers = table_name(MART_SCHEMA, "fct_transfers")
@@ -164,16 +201,32 @@ def build_query(table_name, request: ExportRequest) -> tuple[str, list]:
             raise ExportError(f"--token does not apply to {request.table}")
         conditions.append(f"{filters.token} = ?")
         params.append(normalize_address(request.token))
+    if request.limit is not None and request.limit < 1:
+        raise ExportError(f"--limit must be at least 1, got {request.limit}")
+    return QueryParts(source, conditions, params, columns, order, request.limit)
 
-    query = f"SELECT {columns} FROM ({source}) AS rows"
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    query += f" ORDER BY {order}"
-    if request.limit is not None:
-        if request.limit < 1:
-            raise ExportError(f"--limit must be at least 1, got {request.limit}")
-        query += f" LIMIT {int(request.limit)}"
-    return query, params
+
+# The local table holding a remote warehouse's filtered rows.
+FETCHED = "chainstar_export"
+
+
+def _fetched_query(warehouse, request: ExportRequest) -> tuple[str, list]:
+    """Filter in the warehouse, then order and pick columns in DuckDB.
+
+    The order compares transfer positions as lists of numbers, which only DuckDB
+    has a portable way to say, so the warehouse returns the matching rows and
+    DuckDB sorts them.
+    """
+    parts = query_parts(warehouse.table, request)
+    query = f"SELECT * FROM ({parts.source}) AS filtered"
+    if parts.conditions:
+        query += " WHERE " + " AND ".join(parts.conditions)
+    if not warehouse.has_table(
+        MART_SCHEMA, "fct_transfers" if request.table == TRANSFERS_VIEW else request.table
+    ):
+        raise ExportError(_no_tables(warehouse.target))
+    warehouse.fetch_into(FETCHED, query, parts.params)
+    return f"SELECT {parts.columns} FROM {FETCHED}{_order_and_limit(parts)}", []
 
 
 def _check_excel_size(connection: duckdb.DuckDBPyConnection, query: str, params: list) -> None:

@@ -4,5 +4,5 @@
   key a single column so dbt relationship tests can check it.
 #}
 {% macro chain_key(chain_column) -%}
-    {{ chain_column }}{% for part in varargs %} || ':' || cast({{ part }} as varchar){% endfor %}
+    {{ chain_column }}{% for part in varargs %} || ':' || cast({{ part }} as {{ chainstar.type_text() }}){% endfor %}
 {%- endmacro %}

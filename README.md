@@ -79,7 +79,8 @@ The rest of this page is the full reference.
 ## How it works
 
 chainstar pulls blocks, transactions and token transfers from an RPC endpoint (yours, or
-a free public one), saves them as Parquet, loads them into DuckDB or Postgres, and builds
+a free public one), saves them as Parquet, loads them into your warehouse (DuckDB,
+Postgres, MotherDuck, ClickHouse, BigQuery or Snowflake) or a Parquet data lake, and builds
 a small star schema with dbt: facts for transfers and fees, dimensions for wallets,
 tokens, contracts and dates. All chains share the same tables, so one warehouse can hold
 Ethereum, Base, Bitcoin and Solana side by side.
@@ -102,7 +103,9 @@ extract  →  decode  →  load  →  model
   tests it.
 
 This is an early release (0.1, unreleased). It supports **Ethereum**, **Base**,
-**Bitcoin** and **Solana**, and **DuckDB** and **Postgres** as targets.
+**Bitcoin** and **Solana**, and as targets **DuckDB**, **Postgres**, **MotherDuck**,
+**ClickHouse**, **BigQuery**, **Snowflake** and a **Parquet data lake** on local disk or
+S3-compatible storage; see [Targets](#targets) for how each was tested.
 
 ## Install
 
@@ -126,8 +129,13 @@ pass (`--output mine.xlsx`, `--target duckdb:my.duckdb`) are relative to it. Pas
 own RPC URL with `-e CHAINSTAR_RPC_URL` (it is read from your environment, not written
 into the command). Add `-it` for quickstart's questions; without a terminal it uses the
 defaults, as with `--yes`. The image runs as an unprivileged user (uid 1000); on Linux,
-`--user "$(id -u):$(id -g)"` makes the files yours. DuckDB's `postgres` and `excel`
-extensions are included, so exports and Postgres targets work without downloads.
+`--user "$(id -u):$(id -g)"` makes the files yours. DuckDB's `postgres`, `excel`, `httpfs`,
+`aws` and `motherduck` extensions and the ClickHouse driver are included, so DuckDB,
+Postgres, MotherDuck, ClickHouse and the Parquet lake all work without downloads, in an
+image of about 1 GB unpacked. The BigQuery and Snowflake drivers would nearly double that,
+so they are left out of the published image; to write to those, build your own:
+`docker build --build-arg EXTRAS="all" -t chainstar .` (or `EXTRAS="bigquery"`,
+`EXTRAS="snowflake"`, or `EXTRAS=""` for no drivers).
 
 **uv or pipx** (Python 3.11 or newer):
 
@@ -138,6 +146,14 @@ uv tool install git+https://github.com/Bit-Primitive/chainstar
 
 chainstar is not on PyPI yet; once it is, `uv tool install chainstar` or
 `pipx install chainstar`.
+
+DuckDB, Postgres, MotherDuck and Parquet lakes need nothing more. ClickHouse, BigQuery
+and Snowflake need their drivers, as an extra: `clickhouse`, `bigquery`, `snowflake`, or
+`all`:
+
+```sh
+uv tool install "chainstar[clickhouse] @ git+https://github.com/Bit-Primitive/chainstar"
+```
 
 **cryo**, for Ethereum and Base outside Docker. It is written in Rust; get Rust from
 https://rustup.rs, then:
@@ -549,8 +565,9 @@ ethereum reorg    warning: block 26,239,739 now has hash 0xabababab...ababab, no
 ethereum rollback warning: rolled back from block 26,239,739: deleted 3 chunk files, 47 raw rows and 0 fact rows; syncing them again, then rebuilding the star schema in full
 ```
 
-This is tested with a simulated reorganisation on DuckDB and Postgres: afterwards the
-tables equal a full rebuild from the new chain, and the block before the fork is
+This is tested with a simulated reorganisation on DuckDB, Postgres, ClickHouse and
+Parquet lakes (local and S3-compatible): afterwards the tables equal a full rebuild from
+the new chain, and the block before the fork is
 untouched. Files are deleted before the database, so if the process stops half-way the
 hash check fails again next time and the rollback repeats.
 
@@ -559,9 +576,10 @@ hash check fails again next time and the rollback repeats.
 The star-schema tables are dbt incremental models. Each keeps, per chain, the highest
 block it already holds, and a sync builds only rows above that: new transfers and fees
 are appended, and wallets, tokens and contracts seen again are updated (first seen kept,
-last seen and counts moved on). Both warehouses use dbt's `delete+insert` strategy on
-each table's unique key, which dbt-duckdb and dbt-postgres both support on every version
-chainstar allows (`merge` needs DuckDB 1.4 or Postgres 15). `dim_dates`, a few hundred
+last seen and counts moved on). Each table is updated by its unique key: with dbt's
+`delete+insert` strategy on DuckDB, Postgres, MotherDuck, ClickHouse and Snowflake, and
+with `merge` on BigQuery, whose adapter has no `delete+insert` (see [Targets](#targets)).
+`dim_dates`, a few hundred
 rows a year, is rebuilt each time from a one-row-per-chain summary
 (`chainstar_staging.int_chain_coverage`) instead of from every block.
 
@@ -569,11 +587,13 @@ The tables are rebuilt in full instead whenever older blocks may have changed: o
 chain's first sync (a `run` may have loaded older blocks), after a rollback, with
 `--full-refresh`, and on every `chainstar run`, which therefore behaves as before. An
 incremental build after two syncs gives exactly the rows a full rebuild gives, on
-DuckDB and on Postgres, for all four chains; the tests check it table by table.
+DuckDB, Postgres, ClickHouse and Parquet lakes, for all four chains; the tests check it
+table by table.
 
 On Postgres, sync also indexes the raw tables by chain and block, and the incremental
 tables by key and by chain and block, so a sync reads only its own blocks. DuckDB needs
-no indexes: it skips data by its min/max statistics.
+no indexes: it skips data by its min/max statistics. On ClickHouse the raw tables are
+ordered by chain and block, and on BigQuery clustered by them.
 
 Two things a full rebuild would recompute but an incremental build leaves as they were:
 an ERC-20 token's name, symbol or decimals fetched again later (only if you delete
@@ -583,7 +603,9 @@ the same holds for a Solana mint whose decimals were unknown in its first transf
 ### The progress record
 
 Sync keeps its progress in the warehouse, in `chainstar_state.sync_progress`, one row
-per chain, written in the same transaction as the data it describes:
+per chain, written in the same transaction as the data it describes (on ClickHouse and
+BigQuery, which have no such transactions, after it, as a new version: see
+[Targets](#targets)):
 
 | Column | Meaning |
 | --- | --- |
@@ -664,11 +686,12 @@ One line per step, with the block range, row counts and time taken:
 2026-10-21T17:30:53Z base     extract  52,907,127-52,907,136: erc20_transfers 6,509, blocks 10, transactions 2,133  9.1s
 ```
 
-Steps: `head`, `check`, `extract`, `decode`, `load`, `model`, `export` (wallets),
-`reorg`, `rollback`, `wait`, `stop`. Warnings and errors say so after the step name. With
+Steps: `head`, `check`, `extract`, `decode`, `load`, `model`, `publish` (Parquet lakes),
+`export` (wallets), `reorg`, `rollback`, `wait`, `stop`. Warnings and errors say so after the step name. With
 `--json-logs` each line is a JSON object with `time`, `level`, `chain`, `stage`,
 `message`, `seconds` where timed, and the step's numbers (`first_block`, `last_block`,
-`rows`, `head`, `safe_head`, ...), for log shippers. RPC URLs are redacted in both.
+`rows`, `head`, `safe_head`, ...), for log shippers. RPC URLs are redacted in both, and
+warnings and errors are cleared of warehouse passwords, tokens and keys.
 
 ### Good to know
 
@@ -687,7 +710,8 @@ Steps: `head`, `check`, `extract`, `decode`, `load`, `model`, `export` (wallets)
   warehouse they take a growing share of each sync.
 - **A DuckDB file has one writer.** `chainstar status` waits up to 15 seconds while a sync
   step holds it; other tools that open the file can make a sync fail with a hint, as for
-  `run`. For a warehouse others query while it syncs, use Postgres.
+  `run`. For a warehouse others query while it syncs, use one of the server warehouses,
+  or a Parquet lake, which readers query from its files.
 - **Public endpoints** are fine for `--every 5m` on one or two chains. A Bitcoin block is
   about 6 MB to download from them, so a long Bitcoin catch-up wants your own node.
 
@@ -731,6 +755,50 @@ publicnode endpoints are the defaults when no RPC URL is set (see
 
 ## Targets
 
+`--target` (or `CHAINSTAR_TARGET`, or `target:` in `chainstar.yml`) says where the
+tables go. Every target works with `run`, `sync` (its progress record, reorganisation
+rollbacks and incremental builds), `status` and `export`. Passwords, tokens and keys never
+go in the target or in `chainstar.yml`: each comes from an environment variable or the
+warehouse's own standard mechanism, never appears in dbt's profile (dbt reads it from a
+`DBT_ENV_SECRET_*` variable, which dbt keeps out of its logs), and chainstar removes it
+from every error.
+
+| Target | `--target` | Credentials | Raw rows loaded by | Incremental strategy | Tested how |
+| --- | --- | --- | --- | --- | --- |
+| DuckDB | `duckdb:PATH` | none | `INSERT ... SELECT` from the Parquet files | `delete+insert` | live: every end-to-end test |
+| Postgres | `postgres:postgresql://USER@HOST:5432/DB` | `PGPASSWORD` | DuckDB's `postgres` extension | `delete+insert` | live: `postgres:16-alpine` in Docker |
+| MotherDuck | `motherduck:DB` or `duckdb:md:DB` | `motherduck_token` | `INSERT ... SELECT` from the Parquet files, through DuckDB | `delete+insert` (dbt-duckdb) | unit only: URL, profile, load path with DuckDB standing in. **Not run against MotherDuck** (no token) |
+| Parquet lake | `parquet:PATH`, `parquet:s3://BUCKET/PREFIX` | S3: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN`), else the AWS credential chain | built in a local DuckDB engine, published with `COPY ... TO` Parquet | `delete+insert` in the engine; publishing rewrites changed partitions | live: local disk; S3 API on `adobe/s3mock:5.2.3` in Docker (multipart uploads and listing checked). **Not run against AWS S3, R2 or MinIO** |
+| ClickHouse | `clickhouse:http://USER@HOST:8123` (or `https://...:8443`) | `CLICKHOUSE_PASSWORD` | `INSERT ... FORMAT Parquet` over HTTP | `delete+insert` (dbt-clickhouse's `delete_insert`, lightweight deletes) | live: `clickhouse/clickhouse-server:25.8` in Docker |
+| BigQuery | `bigquery:PROJECT` (`?location=EU`) | Application Default Credentials | load jobs, source format Parquet | `merge` on the unique key | unit, and the models' SQL on the BigQuery emulator. **Not run against BigQuery**; dbt-bigquery and load jobs not run at all |
+| Snowflake | `snowflake:USER@ACCOUNT/DB?warehouse=WH&role=ROLE` | `SNOWFLAKE_PASSWORD`, or a key pair in `SNOWFLAKE_PRIVATE_KEY_PATH` (and `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`), or `&authenticator=externalbrowser` | PUT to the table's stage, then `COPY INTO ... MATCH_BY_COLUMN_NAME` from Parquet | `delete+insert` | unit only: statements and profile, and the models compiled and parsed as Snowflake SQL. **Not run against Snowflake** |
+
+ClickHouse, BigQuery and Snowflake need their extra (`chainstar[clickhouse]`,
+`chainstar[bigquery]`, `chainstar[snowflake]`; see [Install](#install)); the Docker image
+has them all. `chainstar doctor --target ...` checks the target without changing it: it
+connects (ClickHouse and Snowflake report their versions), lists a lake's files, checks
+the MotherDuck token, and names the extra to install when the dbt adapter is missing.
+
+What "tested" means above: *live* is the full suite (load, build and its 54 dbt tests,
+two syncs equal to a full rebuild, a reorganisation rolled back, exports) against the
+real thing in a throwaway container, and on ClickHouse the star schema equals DuckDB's
+row for row and type for type. *Unit* checks what chainstar sends: the SQL, its
+parameters and their types, the Parquet files given to the bulk loader, and the dbt
+profile. For BigQuery and Snowflake the bundled dbt project is also compiled offline,
+for a first build and an incremental one, and every model and test must parse as that
+warehouse's SQL. On the BigQuery emulator (`ghcr.io/goccy/bigquery-emulator:0.8.1`),
+which uses BigQuery's own SQL front end, the 23 models build from the compiled SQL and
+the star schema equals DuckDB's; the emulator cannot run dbt-bigquery (its `create
+schema` job fails) or Parquet load jobs (it crashes), so neither was tested, and a bug in
+it (`SELECT x, x AS y ... UNION ALL SELECT 2, 3` returns 2 for `y`) blanks the Bitcoin
+and Solana fees, which that test leaves out.
+
+Every target gets the same schemas: `chainstar_raw` (the extracted columns, as loaded:
+cryo's for Ethereum and Base, and `bitcoin_*` and `solana_*` tables), `chainstar_staging`
+(dbt views and the `chains` seed) and `chainstar` (the star schema). `chainstar sync` adds
+a fourth, `chainstar_state`, for its [progress record](#the-progress-record). ClickHouse
+calls them databases and BigQuery datasets.
+
 **DuckDB**: `--target duckdb:path/to/file.duckdb`. The file is created if it does not
 exist. Avoid naming it `chainstar.duckdb`: DuckDB names the database after the file, so
 `chainstar.fct_transfers` would become ambiguous and you would have to write
@@ -742,10 +810,98 @@ history. chainstar loads raw tables through DuckDB's `postgres` extension, which
 downloads from its extension repository the first time it is used. The database user
 needs permission to create schemas.
 
-Both targets get three schemas: `chainstar_raw` (the extracted columns, as loaded: cryo's
-for Ethereum and Base, and `bitcoin_*` and `solana_*` tables), `chainstar_staging` (dbt
-views and the `chains` seed) and `chainstar` (the star schema). `chainstar sync` adds a
-fourth, `chainstar_state`, for its [progress record](#the-progress-record).
+**MotherDuck**: `--target motherduck:my_db` (or `duckdb:md:my_db`), with your token in
+`motherduck_token`. It runs exactly as a DuckDB file does, through DuckDB's `md:` paths
+and its `motherduck` extension, which DuckDB downloads the first time (the Docker image
+includes it). Untested against MotherDuck itself (no token was available), so these are
+open: whether the database must exist first, and whether MotherDuck's transactions cover
+a sync batch as DuckDB's do.
+
+**Parquet data lake**: `--target parquet:./lake` on local disk, or
+`parquet:s3://bucket/prefix` on S3-compatible storage. The star schema and the progress
+record are written in the Hive layout that DuckDB, Spark, Athena and Trino read:
+
+```
+lake/chainstar/fct_transfers/chain=base/date_day=2026-10-21/data_0.parquet
+lake/chainstar/fct_fees/chain=base/date_day=2026-10-21/data_0.parquet
+lake/chainstar/dim_wallets/chain=base/data_0.parquet        (and dim_tokens, dim_contracts)
+lake/chainstar/dim_dates/data_0.parquet
+lake/chainstar_state/sync_progress/data_0.parquet
+lake/_chainstar/published.parquet                           (what was published)
+```
+
+The partition columns are in the folder names only, as those engines expect, so read
+the files with Hive partitioning, for example in DuckDB
+`select * from read_parquet('lake/chainstar/fct_transfers/**/*.parquet', hive_partitioning = true)`.
+
+How it is built: in a local DuckDB file, the engine (`lake-engine.duckdb` in the current
+folder; choose another with `?engine=PATH`), exactly as a DuckDB target, then published
+to the lake after each successful build. dbt-duckdb can write Parquet directly (its
+`external` materialization), but it rewrites each table in full every time and cannot
+build incrementally; building in the engine keeps incremental builds, the transactional
+progress record and reorganisation rollbacks the same as on DuckDB, and the lake only
+ever receives tables that were built and tested. Publishing is incremental too: each
+partition's row count and a hash of its rows are kept in `_chainstar/published.parquet`,
+and only partitions whose rows changed are rewritten. A partition that no longer exists
+(after a rollback, for example) is deleted on local disk; on object storage, which DuckDB
+writes but cannot delete from, its file is replaced by an empty one, which readers see as
+no rows. The manifest is written last, so a publish that stops half-way is completed by
+the next one. Each file is replaced in one upload, but a reader that lists the lake while
+a publish runs can see some partitions new and others not yet. Keep the engine file with
+the data folder: it holds the raw tables and the progress that later syncs continue
+from. `status` and `export` read the lake itself, so they work on any machine that can
+reach it.
+
+For S3, set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and `AWS_SESSION_TOKEN` for
+temporary keys); without them chainstar uses the AWS credential chain (shared config and
+credentials files, SSO, instance and container roles). The region comes from `?region=`,
+`AWS_REGION` or `AWS_DEFAULT_REGION`. For other S3-compatible storage name its endpoint;
+`http://` turns TLS off, and requests use path-style URLs unless `url_style=vhost`:
+
+```sh
+--target "parquet:s3://my-bucket/chainstar?region=eu-west-1"                                   # AWS S3
+--target "parquet:s3://my-bucket/chainstar?endpoint=https://ACCOUNT_ID.r2.cloudflarestorage.com&region=auto"   # Cloudflare R2
+--target "parquet:s3://my-bucket/chainstar?endpoint=http://127.0.0.1:9000&region=us-east-1"    # MinIO
+```
+
+**ClickHouse**: `--target clickhouse:http://user@host:8123`, or `https://` for TLS (port
+8443 by default), with the password in `CLICKHOUSE_PASSWORD`. chainstar's schemas become
+ClickHouse databases, so the user needs to create databases and tables. Raw tables are
+`MergeTree` tables ordered by chain and block, with nullable columns. dbt-clickhouse
+builds the star schema with `delete+insert` (its `delete_insert`), which deletes with
+lightweight `DELETE`, so the user must be allowed to set
+`allow_nondeterministic_mutations`; dbt sessions also set `join_use_nulls` and
+`cast_keep_nullable`, which the models need. ClickHouse has no transaction spanning
+several statements, so a sync batch is not atomic there: the raw rows are replaced first
+and the progress row is written last, as a new version of the row (the progress table has
+a `_version` column, and readers take the newest). If a sync stops between the two, the
+next one finds the old progress and loads the same blocks again, replacing them rather
+than adding them twice (the tests simulate this). A rollback deletes raw and fact rows
+before it records the new progress, so if it stops half-way the hash check fails again
+and it repeats.
+
+**BigQuery**: `--target bigquery:my-project`, optionally `?location=EU` for where new
+datasets are made. Credentials are Google's Application Default Credentials: the key file
+named by `GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default login`, or
+the metadata server on Google Cloud. chainstar's schemas become datasets of the project;
+the identity needs to create datasets and run load and query jobs. Raw rows go up as
+Parquet load jobs and the raw tables are clustered by chain and block; the star schema
+uses dbt-bigquery's `merge` on each table's key, which replaces the same rows
+`delete+insert` would. BigQuery's multi-statement transactions need sessions, which
+chainstar does not use, so progress is versioned as on ClickHouse. Every sync runs DML and
+load jobs, which BigQuery bills or counts against quotas. Query results for `export`
+arrive as Arrow; whole-number `BIGNUMERIC` columns come back as 38-digit decimals.
+
+**Snowflake**: `--target "snowflake:user@account/DATABASE?warehouse=WH&role=ROLE"`. The
+account is your account identifier (for example `myorg-myaccount`). The password comes
+from `SNOWFLAKE_PASSWORD`; for key-pair authentication set `SNOWFLAKE_PRIVATE_KEY_PATH`
+(and `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` if the key is encrypted) instead; for single
+sign-on add `&authenticator=externalbrowser`. The database must exist; chainstar's
+schemas are created in it, in upper case, as Snowflake stores unquoted names. Raw rows are
+uploaded to each table's stage with PUT and loaded with `COPY INTO ... FILE_FORMAT =
+(TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`, each file under a new name and
+with `FORCE = TRUE`, so a repeated load is never skipped as already loaded, and inside the
+batch's transaction together with its progress, as on DuckDB and Postgres.
 
 ## The star schema
 
@@ -899,6 +1055,13 @@ its not-null test skips that chain.
 ## Limitations of this release
 
 - **Chains**: Ethereum, Base, Bitcoin mainnet and Solana mainnet-beta.
+- **Targets not run against the real service**: MotherDuck, BigQuery and Snowflake were
+  built from their documentation and adapter source and checked as the
+  [Targets](#targets) table says, not against an account. ClickHouse was tested on a
+  single 25.8 server, not on ClickHouse Cloud or a cluster (chainstar sets no
+  `ON CLUSTER` or replicated engines); S3 lakes on s3mock, not on AWS S3, R2 or MinIO.
+- **ClickHouse and BigQuery batches are not atomic**: a sync that stops between loading
+  a batch and recording it loads the batch again next time (see [Targets](#targets)).
 - **Events**: ERC-20 transfers only on Ethereum and Base. NFT transfers are not
   extracted: cryo's ERC-20 dataset skips ERC-721 `Transfer` events (they have an extra
   indexed topic), and ERC-1155 uses different events. Swaps are not modelled yet.
@@ -951,13 +1114,13 @@ Not built yet, in rough order:
 - swaps fact table (`fct_swaps`)
 - more EVM chains
 - SPL mints and burns, and Solana token names from on-chain metadata
-- BigQuery and Snowflake targets through dbt adapters
+- BigQuery and Snowflake verified against real accounts, and MotherDuck with a token
 - Homebrew formula
 
 ## Development
 
 ```sh
-uv sync
+uv sync --all-extras     # every warehouse driver, so every test can run
 uv run pytest            # unit and end-to-end tests; no RPC or cryo needed
 uv run ruff check . && uv run ruff format --check .
 docker build -t chainstar .   # the image; the cryo compile takes about 5 minutes
@@ -966,10 +1129,18 @@ docker build -t chainstar .   # the image; the cryo compile takes about 5 minute
 The tests use small Parquet files cut from real cryo output (`tests/fixtures/`), and real
 Bitcoin and Solana RPC responses sliced to a few transactions (`tests/rpc_fixtures/`),
 from which the Bitcoin and Solana Parquet fixtures are produced by chainstar's own
-extractors. The end-to-end tests load all four chains into one warehouse. The Postgres
-end-to-end test runs only when `CHAINSTAR_TEST_POSTGRES_DSN` points at a throwaway
-database. The Excel export test downloads DuckDB's `excel` extension the first time and
-is skipped when it cannot.
+extractors. The end-to-end tests load all four chains into one warehouse. Some need a
+server, and run only when it is named; give each a throwaway one, as CI does:
+
+| Variable | Example | Runs |
+| --- | --- | --- |
+| `CHAINSTAR_TEST_POSTGRES_DSN` | `postgresql://chainstar:chainstar@127.0.0.1:5432/chainstar_test` (`postgres:16-alpine`) | Postgres end to end |
+| `CHAINSTAR_TEST_CLICKHOUSE_URL` | `http://chainstar:chainstar@127.0.0.1:8123` (`clickhouse/clickhouse-server:25.8`) | ClickHouse end to end |
+| `CHAINSTAR_TEST_S3_ENDPOINT`, `CHAINSTAR_TEST_S3_BUCKET` | `http://127.0.0.1:9090`, `chainstar-test` (`adobe/s3mock:5.2.3`) | Parquet lakes on S3 |
+| `CHAINSTAR_TEST_BIGQUERY_EMULATOR` | `http://127.0.0.1:9050` (`ghcr.io/goccy/bigquery-emulator:0.8.1`, port published as the same number) | BigQuery SQL on the emulator |
+
+Each test file's docstring has the `docker run` line. The Excel export test downloads
+DuckDB's `excel` extension the first time and is skipped when it cannot.
 
 ## Releasing
 

@@ -31,7 +31,13 @@ keywords = [
     "dbt",
     "duckdb",
     "postgres",
+    "clickhouse",
+    "bigquery",
+    "snowflake",
+    "motherduck",
     "parquet",
+    "data lake",
+    "s3",
     "csv",
     "excel",
     "cryo",
@@ -63,6 +69,15 @@ dependencies = [
     "dbt-postgres>=1.8,<2",
 ]
 
+[project.optional-dependencies]
+# Warehouses reached through their own drivers. DuckDB, Postgres, MotherDuck and
+# Parquet lakes (local or S3-compatible) need nothing extra.
+clickhouse = ["dbt-clickhouse>=1.10,<2", "clickhouse-connect>=0.10"]
+bigquery = ["dbt-bigquery>=1.10,<2"]
+# pyarrow: Snowflake's connector returns query results to export as Arrow tables.
+snowflake = ["dbt-snowflake>=1.10,<2", "pyarrow>=14"]
+all = ["chainstar[clickhouse,bigquery,snowflake]"]
+
 [project.urls]
 Homepage = "https://bitprimitive.com/projects/chainstar"
 Documentation = "https://github.com/Bit-Primitive/chainstar#readme"
@@ -93,4 +108,8 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["postgres: needs a Postgres server (set CHAINSTAR_TEST_POSTGRES_DSN)"]
+markers = [
+    "postgres: needs a Postgres server (set CHAINSTAR_TEST_POSTGRES_DSN)",
+    "clickhouse: needs a ClickHouse server (set CHAINSTAR_TEST_CLICKHOUSE_URL)",
+    "s3: needs S3-compatible storage (set CHAINSTAR_TEST_S3_ENDPOINT)",
+]

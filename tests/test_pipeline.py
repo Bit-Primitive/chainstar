@@ -9,7 +9,7 @@ from chainstar.config import BlockRange, RunSettings
 from chainstar.model import ModelResult
 from chainstar.pipeline import PipelineError, run_pipeline
 from chainstar.rpc import NodeIdentity
-from chainstar.targets import DuckDBTarget
+from chainstar.targets import DuckDBTarget, parse_target
 
 
 def _settings(chain: str, blocks: BlockRange, tmp_path: Path) -> RunSettings:
@@ -119,3 +119,21 @@ def test_public_endpoint_notice(node, tmp_path: Path):
     with pytest.raises(PipelineError):
         run_pipeline(settings, lines.append)
     assert any("free shared public endpoint (5 requests/s" in line for line in lines)
+
+
+def test_run_into_a_lake_publishes_after_the_build(node, monkeypatch, data_dir: Path, tmp_path):
+    node["value"] = NodeIdentity(True, "chain id 1, latest block 26,239,800", "ethereum", 26239800)
+    monkeypatch.setattr(pipeline, "_extract_evm", lambda settings, echo: None)
+    lake = parse_target(f"parquet:{tmp_path}/lake?engine={tmp_path}/engine.duckdb")
+    settings = replace(
+        _settings("ethereum", BlockRange(26239738, 26239740), tmp_path),
+        target=lake,
+        data_dir=data_dir,
+    )
+    lines: list[str] = []
+    run_pipeline(settings, lines.append)
+    publish = next(line for line in lines if line.startswith("publish"))
+    # One partition per table: one chain, one day. 562 + 50 + 581 + 11 + 11 + 1 rows.
+    assert "parquet lake     6 partitions written (1,216 rows), 0 unchanged" in publish
+    assert any(line.split() == ["fct_transfers", "562"] for line in lines)
+    assert (tmp_path / "lake/chainstar/fct_transfers/chain=ethereum").is_dir()
