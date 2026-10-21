@@ -20,6 +20,7 @@ from chainstar.model import MART_SCHEMA, MART_TABLES, ModelError, build_models
 from chainstar.public_rpc import public_notice
 from chainstar.redact import redact_url
 from chainstar.rpc import identify_node
+from chainstar.swaps import decode_pool_metadata, extract_wallet_pricing_swaps
 from chainstar.targets import LakeTarget
 
 # Extractors for the chains cryo does not support. Each returns rows per dataset.
@@ -183,14 +184,27 @@ def _extract_evm_wallet(settings: RunSettings, wallet: str, echo: Echo) -> None:
         transfers = extract_wallet_transfers(settings, wallet)
     _line(echo, "extract", "erc20_transfers", f"{transfers:,} sent or received", elapsed())
     with _timed() as elapsed:
+        pools, swaps = extract_wallet_pricing_swaps(settings)
+    _line(echo, "extract", "dex_swaps", f"{swaps:,} in {pools:,} pricing pools", elapsed())
+    with _timed() as elapsed:
         blocks = extract_blocks_with_transfers(settings)
-    _line(echo, "extract", "blocks", f"{blocks:,} new (blocks with transfers)", elapsed())
+    _line(echo, "extract", "blocks", f"{blocks:,} new (blocks with transfers or swaps)", elapsed())
     # Fees need every transaction of the range; a wallet history does not.
     _line(echo, "extract", TRANSACTIONS.name, "skipped for a wallet", "")
     _decode(settings, echo)
 
 
 def _decode(settings: RunSettings, echo: Echo) -> None:
+    # Pools first: their tokens' decimals are read with the transfers' tokens.
+    with _timed() as elapsed:
+        seen, fetched = decode_pool_metadata(settings)
+    _line(
+        echo,
+        "decode",
+        "dex_pools",
+        f"{seen:,} pools ({fetched:,} new, {seen - fetched:,} cached)",
+        elapsed(),
+    )
     with _timed() as elapsed:
         metadata = decode_token_metadata(settings)
     cached = metadata.tokens_seen - metadata.tokens_fetched

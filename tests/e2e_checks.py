@@ -11,6 +11,8 @@ from chainstar.targets import Target
 # A USDT transfer in the fixture slice: raw value 26240000 with USDT's 6 decimals
 # is 26.24 USDT.
 USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7"
+# Staging, intermediate and mart models in the bundled dbt project.
+MODELS = 30
 
 
 def load_and_build(
@@ -21,7 +23,7 @@ def load_and_build(
     # As `chainstar run` does: the load replaced the chain's raw rows, so rebuild.
     result = build_models(target, work_dir, full_refresh=True)
     assert result.failures == [], result.failures
-    assert result.models == 23
+    assert result.models == MODELS
     assert result.tests_passed > 40
 
 

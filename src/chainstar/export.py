@@ -8,7 +8,9 @@ extension, which DuckDB downloads from its extension repository the first time,
 like the `postgres` extension; no extra Python package is needed.
 
 `amount_raw` stays text in every format, so 256-bit token amounts keep every
-digit; `amount` is a number for sums and charts.
+digit; `amount` is a number for sums and charts. `amount_usd` is the amount at
+the token's hourly on-chain USD price, with the price, how it was derived, its
+confidence and the hour it is for beside it, so each value can be checked.
 """
 
 import re
@@ -39,7 +41,7 @@ class Filters:
     """Columns that --wallet and --token match in each table; None when it does not apply."""
 
     wallet: tuple[str, ...] | None
-    token: str | None
+    token: str | tuple[str, ...] | None
     chain: bool = True
 
 
@@ -47,9 +49,14 @@ TABLE_FILTERS: dict[str, Filters] = {
     TRANSFERS_VIEW: Filters(wallet=("from_address", "to_address"), token="token_address"),
     "fct_transfers": Filters(wallet=("from_address", "to_address"), token="token_address"),
     "fct_fees": Filters(wallet=("from_address", "to_address"), token=None),
+    "fct_swaps": Filters(
+        wallet=("trader", "sender", "recipient"), token=("token_in_address", "token_out_address")
+    ),
+    "fct_token_prices": Filters(wallet=None, token="token_address"),
     "dim_wallets": Filters(wallet=("address",), token=None),
     "dim_tokens": Filters(wallet=None, token="token_address"),
     "dim_contracts": Filters(wallet=None, token="contract_address"),
+    "dim_pools": Filters(wallet=None, token=("token0_address", "token1_address")),
     "dim_dates": Filters(wallet=None, token=None, chain=False),
 }
 
@@ -170,7 +177,8 @@ def query_parts(table_name, request: ExportRequest) -> QueryParts:
             "SELECT t.block_timestamp, t.chain, t.block_number, t.transaction_hash, "
             "t.transfer_position, t.token_address, k.symbol AS token_symbol, "
             "k.name AS token_name, t.from_address, t.to_address, t.amount, t.amount_raw, "
-            "t.transaction_index "
+            "t.amount_usd, t.usd_price, t.price_method, t.price_confidence, "
+            "t.price_bucket_start, t.transaction_index "
             f"FROM {transfers} AS t LEFT JOIN {tokens} AS k USING (token_id)"
         )
         # transfer_position is text such as "12" or "3.1"; compare it as numbers.
@@ -194,16 +202,23 @@ def query_parts(table_name, request: ExportRequest) -> QueryParts:
     if request.wallet:
         if not filters.wallet:
             raise ExportError(f"--wallet does not apply to {request.table}")
-        conditions.append("? IN (" + ", ".join(filters.wallet) + ")")
-        params.append(normalize_address(request.wallet))
+        conditions.append(_any_equals(filters.wallet))
+        params += [normalize_address(request.wallet)] * len(filters.wallet)
     if request.token:
         if not filters.token:
             raise ExportError(f"--token does not apply to {request.table}")
-        conditions.append(f"{filters.token} = ?")
-        params.append(normalize_address(request.token))
+        token_columns = (filters.token,) if isinstance(filters.token, str) else filters.token
+        conditions.append(_any_equals(token_columns))
+        params += [normalize_address(request.token)] * len(token_columns)
     if request.limit is not None and request.limit < 1:
         raise ExportError(f"--limit must be at least 1, got {request.limit}")
     return QueryParts(source, conditions, params, columns, order, request.limit)
+
+
+def _any_equals(columns: tuple[str, ...]) -> str:
+    """One parameter matched against several columns. Written as ORs: ClickHouse
+    accepts `? IN (a, b)` only with constants on the right."""
+    return "(" + " OR ".join(f"{column} = ?" for column in columns) + ")"
 
 
 # The local table holding a remote warehouse's filtered rows.

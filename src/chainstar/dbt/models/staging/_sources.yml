@@ -10,6 +10,8 @@ sources:
       - name: transactions
       - name: erc20_transfers
       - name: erc20_metadata
+      - name: dex_swaps
+      - name: dex_pools
       - name: bitcoin_blocks
       - name: bitcoin_transactions
       - name: bitcoin_inputs
@@ -17,3 +19,4 @@ sources:
       - name: solana_blocks
       - name: solana_transactions
       - name: solana_transfers
+      - name: solana_swaps

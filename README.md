@@ -6,8 +6,9 @@ Raw blockchain data to clean dimensional tables in your own warehouse, from one 
 [Live demo](https://bitprimitive.com/projects/chainstar/demo) ·
 [Source](https://github.com/Bit-Primitive/chainstar)
 
-chainstar reads blocks, transactions and token transfers from Ethereum, Base, Bitcoin and
-Solana, and turns them into tidy tables you can open in a spreadsheet or query with SQL.
+chainstar reads blocks, transactions, token transfers and DEX swaps from Ethereum, Base,
+Bitcoin and Solana, and turns them into tidy tables you can open in a spreadsheet or query
+with SQL, with USD values from prices it derives from on-chain swaps.
 It runs on your own computer: nothing is sent anywhere except requests to the blockchain
 node, and it needs no account or sign-up.
 
@@ -54,7 +55,9 @@ chainstar export transfers --output transfers.xlsx
 (with Docker: `docker run --rm -v "$PWD:/work" ghcr.io/bit-primitive/chainstar export transfers --output transfers.xlsx`)
 
 Each row is one transfer: when, which token (`token_symbol`), from whom, to whom, and how
-much (`amount`). `amount_raw` is the exact amount in the token's smallest unit. Prefer
+much (`amount`), and what that was worth in US dollars (`amount_usd`, when the token has
+an on-chain price that hour; see [Swaps and USD prices](#swaps-and-usd-prices)).
+`amount_raw` is the exact amount in the token's smallest unit. Prefer
 `.xlsx` over `.csv` for spreadsheets: a spreadsheet opening a CSV rounds long numbers
 like `amount_raw`.
 
@@ -81,9 +84,9 @@ The rest of this page is the full reference.
 chainstar pulls blocks, transactions and token transfers from an RPC endpoint (yours, or
 a free public one), saves them as Parquet, loads them into your warehouse (DuckDB,
 Postgres, MotherDuck, ClickHouse, BigQuery or Snowflake) or a Parquet data lake, and builds
-a small star schema with dbt: facts for transfers and fees, dimensions for wallets,
-tokens, contracts and dates. All chains share the same tables, so one warehouse can hold
-Ethereum, Base, Bitcoin and Solana side by side.
+a small star schema with dbt: facts for transfers, fees, swaps and USD prices, dimensions
+for wallets, tokens, contracts, pools and dates. All chains share the same tables, so one
+warehouse can hold Ethereum, Base, Bitcoin and Solana side by side.
 
 ```
 extract  →  decode  →  load  →  model
@@ -92,12 +95,14 @@ extract  →  decode  →  load  →  model
 ```
 
 - **extract**: on Ethereum and Base, [cryo](https://github.com/paradigmxyz/cryo) fetches
-  blocks, transactions and ERC-20 `Transfer` events for your block range into Parquet
-  files, decoding each `Transfer` log into token, sender, recipient and value. cryo does
-  not support Bitcoin or Solana, so for those chainstar reads blocks over plain JSON-RPC
-  itself and writes Parquet files in the same layout (see [Chains](#chains)).
-- **decode** (Ethereum and Base): for every token contract seen, cryo calls `name()`,
-  `symbol()` and `decimals()`.
+  blocks, transactions, ERC-20 `Transfer` events and DEX `Swap` events for your block
+  range into Parquet files, decoding each `Transfer` log into token, sender, recipient
+  and value; chainstar decodes the swaps. cryo does not support Bitcoin or Solana, so
+  for those chainstar reads blocks over plain JSON-RPC itself and writes Parquet files in
+  the same layout (see [Chains](#chains)), deriving Solana swaps from the transactions.
+- **decode** (Ethereum and Base): for every pool seen, chainstar reads its tokens and
+  factory and asks the factory to confirm it; for every token contract seen, cryo calls
+  `name()`, `symbol()` and `decimals()`.
 - **load**: the Parquet files are copied into raw tables (schema `chainstar_raw`).
 - **model**: a bundled dbt project builds the star schema (schema `chainstar`) and
   tests it.
@@ -289,8 +294,8 @@ chunks already saved.
 ### Exporting
 
 `chainstar export [TABLE]` saves a table to a file. `TABLE` is `transfers` (the default)
-or any star-schema table: `fct_transfers`, `fct_fees`, `dim_wallets`, `dim_tokens`,
-`dim_contracts`, `dim_dates`.
+or any star-schema table: `fct_transfers`, `fct_fees`, `fct_swaps`, `fct_token_prices`,
+`dim_wallets`, `dim_tokens`, `dim_contracts`, `dim_pools`, `dim_dates`.
 
 ```sh
 chainstar export                                         # transfers.csv
@@ -305,15 +310,19 @@ chainstar export fct_fees --format parquet --target postgres:postgresql://me@loc
 | `--output`, `-o` | File to write. Default `<table>.<format>` in the current folder. |
 | `--format` | `csv`, `xlsx` or `parquet`. Default: from `--output`'s extension, else `csv`. |
 | `--chain` | Only this chain's rows. |
-| `--wallet ADDRESS` | Only rows where the address sends or receives (transfers and fees: `from_address` or `to_address`; `dim_wallets`: `address`). Ethereum and Base addresses match in any letter case. |
-| `--token ADDRESS` | Only this token: ERC-20 contract, SPL mint, or `native` for BTC and SOL. |
+| `--wallet ADDRESS` | Only rows where the address sends or receives (transfers and fees: `from_address` or `to_address`; swaps: `trader`, `sender` or `recipient`; `dim_wallets`: `address`). Ethereum and Base addresses match in any letter case. |
+| `--token ADDRESS` | Only this token: ERC-20 contract, SPL mint, or `native` for BTC and SOL (swaps and pools: either side). |
 | `--limit N` | At most N rows. |
 | `--target`, `--config` | Which warehouse, as for `run`. |
 
 `transfers` is `fct_transfers` joined to `dim_tokens`, ordered by chain, block and
 position: `block_timestamp`, `chain`, `block_number`, `transaction_hash`,
 `transfer_position`, `token_address`, `token_symbol`, `token_name`, `from_address`,
-`to_address`, `amount`, `amount_raw`.
+`to_address`, `amount`, `amount_raw`, and for bookkeeping `amount_usd`, `usd_price` (the
+token's on-chain USD price used), `price_method` (how it was derived),
+`price_confidence` and `price_bucket_start` (the UTC hour it is the price of), so each
+USD value can be traced to `fct_token_prices`. A transfer without a usable price has
+these empty.
 
 In every format `amount_raw` stays text, so 256-bit token amounts keep every digit, and
 `amount` is a number. Excel files are written by DuckDB's
@@ -358,7 +367,12 @@ What it costs, honestly:
   hundreds or thousands of blocks per request, which makes a long history quick; check
   your provider's `eth_getLogs` block-range limit. Checked on 20 Base blocks: the same 8
   transfers, byte for byte, as a full run filtered with `export --wallet`, in 18 seconds
-  instead of 202.
+  instead of 202 (before USD values were added). For USD values it also looks up each
+  token's pools against WETH and USDC (10 calls per token on Ethereum, 14 on Base, once),
+  fetches only those pools' swaps, one filtered request per chunk, and the blocks they are
+  in; see [Swaps and USD prices](#swaps-and-usd-prices). Checked on 20 Base blocks on 21
+  October 2026: 16 transfers of one address, every one valued (WETH at 2,489.92 USD from 7
+  pricing pools, against 2,489.87 from all of the range's swaps), in 37 seconds.
 - **Bitcoin and Solana**: their RPC interfaces cannot filter by address, so every block
   in the range is downloaded in full (a Bitcoin block is about 6 MB compressed, a Solana
   block 4 to 8 MB of JSON before compression) and the export keeps the address's rows. It costs the same as
@@ -442,17 +456,19 @@ A real first sync of Base on the public endpoint, 21 October 2026:
 
 ```
 $ chainstar sync --chain base --from-recent 10
-2026-10-21T17:28:58Z all      start    chainstar 0.1.0.dev0; target duckdb:warehouse.duckdb; data data
-2026-10-21T17:28:58Z base     rpc      https://base-rpc.publicnode.com (free shared public endpoint)
-2026-10-21T17:28:58Z base     note     no RPC URL set, so chainstar uses a free shared public endpoint (5 requests/s, fine for trying small ranges); for more, use your own with --rpc-url or CHAINSTAR_RPC_URL
-2026-10-21T17:28:59Z base     head     chain id 8453, latest block 52,907,195; safe head 52,907,136 (60 confirmations)
-2026-10-21T17:30:53Z base     extract  52,907,127-52,907,136: erc20_transfers 6,509, blocks 10, transactions 2,133  9.1s
-2026-10-21T17:30:53Z base     decode   52,907,127-52,907,136: tokens 175, fetched 175  105.5s
-2026-10-21T17:30:54Z base     load     52,907,127-52,907,136: 8,827 raw rows; synced to 52,907,136  0.2s
-2026-10-21T17:31:02Z all      model    dbt build (full refresh: first sync or rollback of base): 23 models, 54 tests passed  8.2s
+2026-10-21T22:55:38Z all      start    chainstar 0.1.0.dev0; target duckdb:warehouse.duckdb; data data
+2026-10-21T22:55:38Z base     rpc      https://base-rpc.publicnode.com (free shared public endpoint)
+2026-10-21T22:55:38Z base     note     no RPC URL set, so chainstar uses a free shared public endpoint (5 requests/s, fine for trying small ranges); for more, use your own with --rpc-url or CHAINSTAR_RPC_URL
+2026-10-21T22:55:38Z base     head     chain id 8453, latest block 52,916,995; safe head 52,916,936 (60 confirmations)
+2026-10-21T22:55:54Z base     extract  52,916,927-52,916,936: erc20_transfers 3,412, dex_swaps 250, blocks 10, transactions 1,856  15.2s
+2026-10-21T23:00:03Z base     decode   52,916,927-52,916,936: pools 96, pools fetched 96, tokens 203, fetched 203  249.4s
+2026-10-21T23:00:03Z base     load     52,916,927-52,916,936: 5,827 raw rows; synced to 52,916,936  0.1s
+2026-10-21T23:00:09Z all      model    dbt build (full refresh: first sync or rollback of base): 30 models, 93 tests passed  5.3s
 ```
 
-and, a few minutes later, the same command without `--from-recent` continues from the next block:
+and, from the release before swaps, a few minutes after an earlier first sync, the same
+command without `--from-recent` continuing from the next block (the decode step now also
+reads each new pool, and the build has 30 models and 93 tests):
 
 ```
 $ chainstar sync --chain base
@@ -516,6 +532,12 @@ public endpoints on 21 October 2026:
 - **Base** makes one block every 2 seconds. On the public endpoint 86 blocks took 70
   seconds to extract, faster than the chain, plus 247 seconds reading names of 411 new
   tokens; that second part shrinks as tokens repeat, because metadata is fetched once.
+  Swaps add the reading of each new pool, about 6 calls in batches of 10, also once per
+  pool: the first 10 blocks above met 96 pools. The next 100 blocks met 357, and after a
+  day of test runs from the same machine the public endpoint refused those batches (HTTP
+  403) a few minutes in, on three tries over 20 minutes. Pools are saved in files of 50, so
+  a try keeps what it read, and the blocks wait, unloaded, for the next sync. A Base sync
+  with swaps wants your own RPC.
 - **Ethereum** makes one block every 12 seconds, well within the public endpoint's pace.
 - **Bitcoin** makes one block about every 10 minutes; one block takes seconds.
 
@@ -715,6 +737,187 @@ warnings and errors are cleared of warehouse passwords, tokens and keys.
 - **Public endpoints** are fine for `--every 5m` on one or two chains. A Bitcoin block is
   about 6 MB to download from them, so a long Bitcoin catch-up wants your own node.
 
+## Swaps and USD prices
+
+chainstar reads DEX swaps on Ethereum, Base and Solana into `fct_swaps`, derives USD
+prices from them into `fct_token_prices`, and values transfers (`amount_usd`), fees
+(`fee_usd`) and swaps (`usd_value`) at those prices. Every price comes from on-chain
+swaps: no price service is asked, nothing needs an account, and nothing is assumed
+except that the USD stablecoins listed below are worth 1 USD. Where a token has no
+reliable price, its USD columns are NULL rather than a guess.
+
+### Venues
+
+**Ethereum and Base.** cryo's `logs` dataset, filtered to three `Swap` events by
+topic0, one `eth_getLogs` request per block as for transfers. chainstar decodes them
+itself, exactly, because their amounts are 256-bit integers (signed in Uniswap v3):
+
+| Event layout | Signature | topic0 | Source |
+| --- | --- | --- | --- |
+| `uniswap_v2` | `Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)` | `0xd78ad95f...159d822` | Uniswap/v2-core `IUniswapV2Pair.sol` |
+| `uniswap_v3` | `Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)` | `0xc42079f9...fbcca67` | Uniswap/v3-core `IUniswapV3PoolEvents.sol`; aerodrome-finance/slipstream `ICLPoolEvents.sol` (identical) |
+| `solidly_v2` | `Swap(address indexed sender, address indexed to, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out)` | `0xb3e27736...efffaf75b` | aerodrome-finance/contracts `IPool.sol` |
+
+Any contract can emit these events, so for every pool chainstar reads `token0()`,
+`token1()` and `factory()` (plus `fee()` and `tickSpacing()`, or `stable()`), then asks
+that factory for the pool of the same tokens (`getPair`, `getPool(tokens, fee)`,
+`getPool(tokens, tickSpacing)` or `getPool(tokens, stable)`). A pool is **verified** when
+the factory answers with the pool's own address and the factory is one of these:
+
+| Chain | Venue | Factory | Published in |
+| --- | --- | --- | --- |
+| Ethereum | `uniswap_v2` | `0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f` | Uniswap v2 deployments page |
+| Ethereum | `uniswap_v3` | `0x1f98431c8ad98523631ae4a59f267346ea31f984` | Uniswap v3 Ethereum deployments page |
+| Ethereum | `sushiswap_v2` | `0xc0aee478e3658e2610c5f7a4a2e1777ce9e4f2ac` | sushi-labs/sushi `sushiswap-v2.ts` |
+| Ethereum | `sushiswap_v3` | `0xbaceb8ec6b9355dfc0269c18bac9d6e2bdc29c4f` | sushi-labs/sushi `sushiswap-v3.ts` |
+| Base | `uniswap_v2` | `0x8909dc15e40173ff4699343b6eb8132c65e18ec6` | Uniswap v2 deployments page |
+| Base | `uniswap_v3` | `0x33128a8fc17869897dce68ed026d694621f6fdfd` | Uniswap v3 Base deployments page |
+| Base | `sushiswap_v2` | `0x71524b4f93c58fcbf659783284e38825f0622859` | sushi-labs/sushi `sushiswap-v2.ts` |
+| Base | `sushiswap_v3` | `0xc35dadb65012ec5796536bd9864ed8773abc74c4` | sushi-labs/sushi `sushiswap-v3.ts` |
+| Base | `aerodrome_v2` | `0x420dd381b31aef6683db6b902084cb0ffece40da` | aerodrome-finance/contracts README |
+| Base | `aerodrome_slipstream` | `0x5e7bb104d84c7cb9b682aac2f3d509f5f406809a`, `0xade65c38cd4849adba595a4323a8c7ddfe89716a`, `0xf8f2eb4940cfe7d13603dddd87f123820fc061ef` | aerodrome-finance/slipstream README (three deployments) |
+
+Each factory was also checked on chain (it has code; the Uniswap and SushiSwap v3 ones
+enable fee tiers 100, 500, 3000 and 10000), and every topic and function selector is
+recomputed from its signature by the tests. Swaps in other pools with the same events
+(forks such as BaseSwap, whose factory address could not be found in its own
+documentation) are kept with venue `unknown` and `pool_verified` false; they are never
+used for prices and get no `usd_value`. Pool metadata is read once per pool at the chain
+head and cached in `data/<chain>/dex_pools/`, like token metadata: reading factories'
+`PairCreated`/`PoolCreated` logs instead would need every block since each factory was
+deployed. A swap whose pool does not answer `token0()` and `token1()` is left out of
+`fct_swaps` (it stays in the raw table).
+
+Not covered: Uniswap v4 (one contract for all pools, whose tokens are known only from
+its `Initialize` events), PancakeSwap v3 (its `Swap` event has two more fields, so a
+different topic0), Curve, Balancer, and aggregators' own events (their swaps show up as
+the pool swaps they route through).
+
+**Solana.** A swap through an aggregator crosses several pools and programs; what
+matters is what the trader gave and got, so chainstar derives one swap per transaction
+from balance changes. A successful transaction counts when it calls one of these
+programs (each id from the program's own source or IDL, and checked on chain to be an
+executable program):
+
+| Venue | Program id | Source |
+| --- | --- | --- |
+| `raydium_amm_v4` | `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8` | raydium-io/raydium-amm |
+| `raydium_clmm` | `CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK` | raydium-io/raydium-clmm |
+| `raydium_cpmm` | `CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C` | raydium-io/raydium-cp-swap |
+| `orca_whirlpool` | `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc` | orca-so/whirlpools |
+| `meteora_dlmm` | `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo` | MeteoraAg/dlmm-sdk IDL |
+| `jupiter_v6` | `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4` | jup-ag/jupiter-cpi |
+| `pump_fun` | `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P` | pump-fun/pump-public-docs IDL |
+| `pump_swap` | `pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA` | pump-fun/pump-public-docs IDL |
+
+For the first signer whose balances changed like a swap, token changes are summed over
+the token accounts it owns (`preTokenBalances`/`postTokenBalances`), and SOL and wrapped
+SOL count as one asset, `native`: its lamport change, plus the fee it paid, plus the
+lamport changes of its token accounts, which nets out wrapping, unwrapping and the rent of
+accounts it opens and closes. Exactly one token down and one up is a swap (SOL that
+moved only for fees, tips or rent is ignored); one token against SOL moving the other way
+is a swap with SOL; anything else (several tokens each way, an arbitrage that ends where
+it started) is left out. Limitations: a SOL amount includes tips and rent paid to
+accounts the signer does not own in the same transaction; programs not listed are not
+read; a transaction gives at most one swap; Solana swaps have no pool, sender or
+recipient, and `dim_pools` has no Solana rows.
+
+### How prices are derived
+
+For each chain, asset and UTC hour (and, separately, UTC day), in `fct_token_prices`:
+
+1. **USD stablecoins are 1 USD** (`usd_stablecoin_peg`), identified by address or mint,
+   never by symbol. `observed_price` shows what their swaps against other stablecoins
+   said, and a dbt test warns when it strays more than 2% from 1.
+2. **Swaps against a stablecoin** give one observation each: the stablecoin amount (its
+   USD value) divided by the other asset's amount. ETH and SOL are priced this way from
+   WETH's and wrapped SOL's swaps, as the asset `native`.
+3. **Swaps against the native asset** price other tokens through the native asset's
+   price in the same bucket, when that price is high or medium confidence. Nothing is
+   priced through a third token: a token traded only against other tokens has no price.
+4. **Outliers**: observations worth less than 10 USD are dropped (mostly rounding);
+   those more than 10% from the bucket's median are rejected. The price is the median of
+   the rest. Medians here are lower medians (for an even count, the lower middle value),
+   always one of the observed prices, so a price is the same to the last digit on every
+   warehouse and in incremental and full builds.
+5. **Confidence**: `high` with at least 5 observations kept, 10,000 USD of volume and 2
+   sources (pools, or Solana traders); `medium` with at least 3 and 1,000 USD; `low`
+   otherwise, when `usd_price` is NULL and `observed_price` still shows the median. Every
+   chain has a row for its native asset and its stablecoins in each bucket with blocks
+   (`none` when there were no observations); other tokens only where they were traded.
+6. **Bitcoin** has no on-chain DEX. Its price is that of wrapped BTC (WBTC and cbBTC) on
+   Ethereum and Base in the same bucket (`cross_chain_wrapped_btc`), at most `medium`,
+   and only when those chains' swaps for that hour are in the same warehouse. Wrapped
+   BTC can trade slightly away from BTC; otherwise BTC values are NULL.
+
+**Checked on real data**, `chainstar quickstart` of 20 blocks of Base and Ethereum and 20
+Solana slots into one warehouse on 21 October 2026 (22:36 to 22:51 UTC): 360, 470 and
+1,285 swaps (separately, each of the 84 swaps in the test fixtures' Ethereum and Base
+blocks was checked against its pool's `Transfer` events, to the unit). ETH came out at
+2,489.33 USD on Ethereum (97 observations, 6 pools, high) and 2,489.87 on Base (21, 7
+pools, high), 0.02% apart; each WETH/stablecoin Uniswap v3 and Slipstream pool's own price
+after its last swap (from `sqrtPriceX96`) was within 0.14% of the hour's price, and the
+medians of pools with two or more swaps spread 0.15% (Ethereum, 4 pools) and 0.03% (Base,
+3). SOL came out at 107.37 USD (medium: 3 swaps of at least 10 USD, through Jupiter,
+Orca and Meteora, 0.9% apart; a fourth, at 50,319, was rejected). USD values were found
+for 52% of Ethereum's transfers, 48% of Base's and 78% of Solana's, and for every fee.
+Incremental builds over the same data, in two halves, equalled a full rebuild.
+
+Only verified pools count on Ethereum and Base. The thresholds are dbt variables in
+`dbt_project.yml` (`price_min_swap_usd`, `price_outlier_band`, `price_high_*`,
+`price_medium_*`).
+
+The anchors:
+
+| Chain | USD stablecoins (1 USD) | Priced as the native asset | Prices Bitcoin |
+| --- | --- | --- | --- |
+| Ethereum | USDC `0xa0b86991...3606eb48`, USDT `0xdac17f95...831ec7`, DAI `0x6b175474...71d0f` | WETH `0xc02aaa39...756cc2` | WBTC `0x2260fac5...c2c599`, cbBTC `0xcbb7c000...eed33bf` |
+| Base | USDC `0x833589fc...da02913`, USDbC `0xd9aaec86...710b6ca`, USDT `0xfde4c96c...2699bb2`, DAI `0x50c57259...17db0cb` | WETH `0x42000000...00000006` | cbBTC `0xcbb7c000...eed33bf` |
+| Solana | USDC `EPjFWdd5...TDt1v`, USDT `Es9vMFrz...enwNYB` | wrapped SOL `So111...112` | |
+
+(full addresses in the `price_assets` seed). They come from Circle's USDC addresses
+page, Tether's supported-protocols page and the Uniswap Labs default token list; their
+decimals were read on chain.
+
+### What gets a USD value
+
+- `fct_transfers.amount_usd`, `fct_fees.fee_usd` and `fct_swaps.usd_value` use the
+  **hourly** price of the block's UTC hour, when its confidence is `peg`, `high` or
+  `medium`, and are NULL otherwise. Beside each: the price (`usd_price`,
+  `native_usd_price`), `price_method`, `price_confidence` and `price_bucket_start`, the
+  hour the price is for, so every value can be checked against `fct_token_prices`.
+- A swap is valued by its stablecoin side if it has one, else its native side, else
+  `token_in`.
+- The `transfers` export and `chainstar wallet` spreadsheets carry the same columns.
+
+**Wallet histories.** `chainstar wallet` does not read every swap of the range. For each
+token the wallet moved, it asks the Uniswap v2 and v3 factories (and Aerodrome's on Base)
+for that token's pools against WETH and USDC, once per token (cached in
+`data/<chain>/.pricing_pools.json`), and fetches only those pools' swaps, with
+`eth_getLogs` filtered by address, which the public endpoints answer for a whole chunk
+per request, and the blocks they are in. The lookup asks Uniswap v2, Uniswap v3 (fee
+tiers 100, 500, 3000 and 10000) and, on Base, Aerodrome v2 (stable and volatile); it does
+not find SushiSwap or Aerodrome Slipstream pools. Tokens without such a pool stay
+unpriced, and a wallet's prices rest on fewer swaps than a full run's, so their
+confidence is often lower. A Bitcoin wallet's warehouse has
+no Ethereum or Base swaps, so its BTC values are NULL; run Bitcoin and Ethereum into one
+warehouse to price them.
+
+### Prices under sync
+
+`fct_token_prices` is incremental like the other tables. A bucket's price is computed
+from all its swaps, so new blocks recompute every bucket from the start of the UTC day of
+the earliest new block, for every chain at once (Bitcoin's price depends on Ethereum's
+and Base's swaps). Transfers, fees and swaps are revalued for the hour of their chain's
+first new block (Bitcoin's: the earliest of Bitcoin's, Ethereum's and Base's), whose
+price may have changed. The tests check that two syncs give exactly the rows of a full
+rebuild, and a rollback deletes a chain's swaps and prices with its other facts.
+
+After upgrading from a release without swaps, rebuild once with
+`chainstar sync --full-refresh` (or any `chainstar run`): the tables have new columns.
+Blocks extracted before the upgrade have no swaps until they are extracted again: a
+`chainstar run` over such a range fetches its swaps and reuses the other chunk files.
+
 ## Chains
 
 | Chain | Extracted by | RPC you need | `--blocks` counts | Identity check |
@@ -779,7 +982,7 @@ has them all. `chainstar doctor --target ...` checks the target without changing
 connects (ClickHouse and Snowflake report their versions), lists a lake's files, checks
 the MotherDuck token, and names the extra to install when the dbt adapter is missing.
 
-What "tested" means above: *live* is the full suite (load, build and its 54 dbt tests,
+What "tested" means above: *live* is the full suite (load, build and its 93 dbt tests,
 two syncs equal to a full rebuild, a reorganisation rolled back, exports) against the
 real thing in a throwaway container, and on ClickHouse the star schema equals DuckDB's
 row for row and type for type. *Unit* checks what chainstar sends: the SQL, its
@@ -787,7 +990,7 @@ parameters and their types, the Parquet files given to the bulk loader, and the 
 profile. For BigQuery and Snowflake the bundled dbt project is also compiled offline,
 for a first build and an incremental one, and every model and test must parse as that
 warehouse's SQL. On the BigQuery emulator (`ghcr.io/goccy/bigquery-emulator:0.8.1`),
-which uses BigQuery's own SQL front end, the 23 models build from the compiled SQL and
+which uses BigQuery's own SQL front end, the 30 models build from the compiled SQL and
 the star schema equals DuckDB's; the emulator cannot run dbt-bigquery (its `create
 schema` job fails) or Parquet load jobs (it crashes), so neither was tested, and a bug in
 it (`SELECT x, x AS y ... UNION ALL SELECT 2, 3` returns 2 for `y`) blanks the Bitcoin
@@ -824,7 +1027,8 @@ record are written in the Hive layout that DuckDB, Spark, Athena and Trino read:
 ```
 lake/chainstar/fct_transfers/chain=base/date_day=2026-10-21/data_0.parquet
 lake/chainstar/fct_fees/chain=base/date_day=2026-10-21/data_0.parquet
-lake/chainstar/dim_wallets/chain=base/data_0.parquet        (and dim_tokens, dim_contracts)
+lake/chainstar/fct_swaps/chain=base/date_day=2026-10-21/data_0.parquet   (and fct_token_prices)
+lake/chainstar/dim_wallets/chain=base/data_0.parquet        (and dim_tokens, dim_contracts, dim_pools)
 lake/chainstar/dim_dates/data_0.parquet
 lake/chainstar_state/sync_progress/data_0.parquet
 lake/_chainstar/published.parquet                           (what was published)
@@ -953,6 +1157,8 @@ One row per value movement:
 | `script_type` | Bitcoin only: the output script type as the node names it (`witness_v0_keyhash`, `nulldata`, ...) |
 | `amount_raw` | the exact value in the asset's smallest unit (satoshis, lamports, token base units), as a whole-number string |
 | `amount` | `amount_raw / 10^decimals` as a floating-point number (about 15 significant digits); NULL when the token's decimals are unknown |
+| `amount_usd` | `amount × usd_price`; NULL when the token has no `peg`, `high` or `medium` price for the block's UTC hour (see [Swaps and USD prices](#swaps-and-usd-prices)) |
+| `usd_price`, `price_method`, `price_confidence`, `price_bucket_start` | the hourly price used, from `fct_token_prices`, and the start of its hour |
 
 `amount_raw` is text because ERC-20 values are 256-bit integers and SPL amounts 64-bit
 unsigned, larger than any numeric type DuckDB and Postgres share. Cast it yourself when
@@ -998,6 +1204,65 @@ One row per fee-paying transaction, with what its payer paid.
 | `execution_fee_wei`, `execution_fee_native` | EVM only, kept from earlier releases; equal to `fee_raw` and `fee_native` |
 | `fee_raw` | the fee in the chain's smallest unit (wei, satoshis, lamports), exact |
 | `native_symbol`, `fee_native` | the fee in ETH, BTC or SOL, as a floating-point number |
+| `fee_usd` | `fee_native` at the native asset's hourly USD price; NULL when unpriced |
+| `native_usd_price`, `price_method`, `price_confidence`, `price_bucket_start` | the hourly price used, and the start of its hour |
+
+### fct_swaps
+
+One row per DEX swap (see [Swaps and USD prices](#swaps-and-usd-prices) for the venues):
+on Ethereum and Base a decoded `Swap` event, on Solana what one signer gave and got in
+a transaction that called a known DEX program.
+
+| Column | Notes |
+| --- | --- |
+| `swap_id` | `chain:transaction_hash:swap_position` |
+| `chain`, `block_number`, `block_timestamp`, `date_day` | |
+| `transaction_hash`, `transaction_index` | |
+| `swap_position`, `log_index` | the log index (EVM); `0` on Solana, one swap per transaction |
+| `venue` | EVM: the pool's factory's venue (`uniswap_v2`, `uniswap_v3`, `sushiswap_v2`, `sushiswap_v3`, `aerodrome_v2`, `aerodrome_slipstream`) or `unknown`; Solana: the known programs called, joined with `+` |
+| `swap_method` | the event layout (`uniswap_v2`, `uniswap_v3`, `solidly_v2`), or `balance_changes` on Solana |
+| `pool_id`, `pool_address`, `pool_verified` | EVM only; joins to `dim_pools`. Only verified pools are priced and valued |
+| `trader` | EVM: the transaction's sender (NULL in a wallet history); Solana: the signer |
+| `sender`, `recipient` | EVM only: the event's fields, usually a router and the receiver |
+| `token_in_id`, `token_out_id`, `token_in_address`, `token_out_address` | what the trader paid and received; `native` for SOL and wrapped SOL on Solana |
+| `amount_in_raw`, `amount_out_raw` | exact amounts in the tokens' smallest units, as text |
+| `amount_in`, `amount_out` | divided by 10^decimals; NULL when decimals are unknown |
+| `usd_value`, `usd_value_side` | the value at the hourly price of one side (`in` or `out`): a stablecoin side first, then the native asset, then `token_in` |
+| `price_method`, `price_confidence`, `price_bucket_start` | of the price used |
+
+On EVM, `trader` is whoever sent the transaction, often a bot or a relayer, and one
+transaction through a router can hold several swaps (one per pool crossed).
+
+### fct_token_prices
+
+One row per chain, asset, granularity (`hour` or `day`) and UTC bucket; see
+[How prices are derived](#how-prices-are-derived).
+
+| Column | Notes |
+| --- | --- |
+| `price_id` | `chain:token_address:granularity:bucket_start_unix` |
+| `chain`, `token_address`, `token_id` | `token_address` is `native` for ETH, BTC and SOL, which WETH and wrapped SOL are priced as |
+| `granularity`, `bucket_start`, `bucket_start_unix`, `date_day` | the UTC hour or day |
+| `usd_price` | what chainstar values things at: 1 for stablecoins; the observed price at `high` or `medium` confidence; otherwise NULL |
+| `observed_price` | the lower median of the observations kept (for stablecoins: from swaps against other stablecoins) |
+| `price_low`, `price_high` | lowest and highest observation kept, the spread within the bucket |
+| `price_method` | `usd_stablecoin_peg`, `swaps_vs_stablecoins`, `swaps_vs_native`, `swaps_vs_stablecoins_and_native` or `cross_chain_wrapped_btc` |
+| `confidence` | `peg`, `high`, `medium`, `low` or `none` |
+| `observations`, `rejected_observations` | swaps kept, and those rejected as more than 10% from the median |
+| `volume_usd` | USD volume of the swaps kept, rounded to cents |
+| `sources` | distinct pools (EVM) or traders (Solana) among them |
+| `last_block_number` | the chain's newest block in the bucket |
+
+### dim_pools
+
+Every Ethereum and Base pool that emitted a swap event, as its contract and factory
+described it when read (once, at the chain head).
+
+`pool_id`, `chain`, `pool_address`, `venue`, `event_family`, `factory_address`,
+`factory_confirms`, `is_verified` (the factory confirms the pool and is a known venue),
+`token0_address`, `token1_address`, `token0_id`, `token1_id`, `fee` (Uniswap v3-style:
+hundredths of a basis point, so 500 is 0.05%), `tick_spacing`, `is_stable` (Aerodrome),
+`metadata_block_number`, `first_seen_block`, `last_seen_block`, `swap_events`
 
 ### dim_wallets
 
@@ -1048,9 +1313,15 @@ One row per UTC day from the earliest to the latest loaded block.
 
 `chainstar run` finishes with `dbt build`, which runs these checks and fails the run if
 any fail: unique and not-null keys on every table, every fact row joining to its date,
-token and wallet dimensions, and every ERC-20 token joining to `dim_contracts`. Where a
-column does not apply to a chain (a Bitcoin output with no single sender, for example),
-its not-null test skips that chain.
+token and wallet dimensions, every EVM swap joining to `dim_pools`, every ERC-20 token
+joining to `dim_contracts`, accepted values for chains, granularities, methods and
+confidences, and every USD price and value positive with each price between its lowest
+and highest observation. Where a column does not apply to a chain (a Bitcoin output with
+no single sender, for example), its not-null test skips that chain. Two checks warn
+instead of failing, because the chain can be right and they still fire: a stablecoin
+whose swaps against other stablecoins put it more than 2% from 1 USD in an hour (at least
+3 swaps), and ETH priced more than 2% apart on Ethereum and Base in the same hour (both
+high confidence).
 
 ## Limitations of this release
 
@@ -1062,9 +1333,17 @@ its not-null test skips that chain.
   `ON CLUSTER` or replicated engines); S3 lakes on s3mock, not on AWS S3, R2 or MinIO.
 - **ClickHouse and BigQuery batches are not atomic**: a sync that stops between loading
   a batch and recording it loads the batch again next time (see [Targets](#targets)).
-- **Events**: ERC-20 transfers only on Ethereum and Base. NFT transfers are not
-  extracted: cryo's ERC-20 dataset skips ERC-721 `Transfer` events (they have an extra
-  indexed topic), and ERC-1155 uses different events. Swaps are not modelled yet.
+- **Events**: ERC-20 transfers and the swap events of
+  [Swaps and USD prices](#swaps-and-usd-prices) only on Ethereum and Base. NFT transfers
+  are not extracted: cryo's ERC-20 dataset skips ERC-721 `Transfer` events (they have an
+  extra indexed topic), and ERC-1155 uses different events.
+- **USD prices** come only from the swaps in the warehouse, so a short range prices only
+  what traded in it, and a token traded only against other tokens is unpriced. Prices are
+  per UTC hour; values use the hourly price only. Stablecoins are taken at 1 USD (a test
+  warns if their swaps disagree); Bitcoin is priced from wrapped BTC on Ethereum and Base
+  and only when those are in the same warehouse. Uniswap v4, PancakeSwap v3, Curve and
+  Balancer are not read. Solana swaps are derived from balance changes, one per
+  transaction, with the limits described there.
 - **Token names lose their spaces.** cryo 0.3.2 strips spaces and control characters
   from `name()` and `symbol()` results, so "Wrapped Ether" arrives as `WrappedEther`.
   Tokens that return `bytes32` names, or that do not implement these functions, may
@@ -1111,7 +1390,7 @@ its not-null test skips that chain.
 
 Not built yet, in rough order:
 
-- swaps fact table (`fct_swaps`)
+- more DEX venues (Uniswap v4, Curve, Balancer, PancakeSwap v3)
 - more EVM chains
 - SPL mints and burns, and Solana token names from on-chain metadata
 - BigQuery and Snowflake verified against real accounts, and MotherDuck with a token

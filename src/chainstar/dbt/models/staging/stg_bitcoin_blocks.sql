@@ -2,6 +2,7 @@ select
     blocks.chain as chain,
     blocks.block_number as block_number,
     blocks.block_hash as block_hash,
+    blocks.{{ chainstar.quoted('timestamp') }} as block_time_unix,
     -- The header time set by the miner, as block explorers show it. It is not
     -- strictly increasing; median_time is.
     {{ chainstar.unix_to_utc_timestamp('blocks.' ~ chainstar.quoted('timestamp')) }} as block_timestamp,

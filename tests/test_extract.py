@@ -1,12 +1,21 @@
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from chainstar import extract
 from chainstar.chains import get_chain
 from chainstar.config import BlockRange, RunSettings
-from chainstar.datasets import BLOCKS, ERC20_METADATA, ERC20_TRANSFERS, parquet_files
+from chainstar.datasets import (
+    BLOCKS,
+    DEX_POOLS,
+    ERC20_METADATA,
+    ERC20_TRANSFERS,
+    dataset_dir,
+    parquet_files,
+)
 from chainstar.targets import DuckDBTarget
 
 
@@ -39,10 +48,20 @@ def recorded_cryo_calls(monkeypatch):
 
 
 def test_decode_skips_tokens_with_metadata_on_disk(data_dir: Path, recorded_cryo_calls):
+    # The fixture's pools trade tokens its transfers never moved; without them,
+    # every token has metadata on disk.
+    shutil.rmtree(dataset_dir(data_dir, "ethereum", DEX_POOLS))
     result = extract.decode_token_metadata(_settings(data_dir))
     assert result.tokens_seen == 11
     assert result.tokens_fetched == 0
     assert recorded_cryo_calls == []
+
+
+def test_decode_reads_the_tokens_of_pools_too(data_dir: Path, recorded_cryo_calls):
+    result = extract.decode_token_metadata(_settings(data_dir))
+    assert (result.tokens_seen, result.tokens_fetched) == (38, 27)
+    fetched = recorded_cryo_calls[0]["args"]
+    assert "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2" not in fetched  # WETH: on disk
 
 
 def test_decode_fetches_missing_tokens_in_labelled_batches(
@@ -50,6 +69,7 @@ def test_decode_fetches_missing_tokens_in_labelled_batches(
 ):
     for file in parquet_files(data_dir, "ethereum", ERC20_METADATA):
         file.unlink()
+    shutil.rmtree(dataset_dir(data_dir, "ethereum", DEX_POOLS))
     monkeypatch.setattr(extract, "METADATA_BATCH_SIZE", 4)
 
     result = extract.decode_token_metadata(_settings(data_dir))
@@ -104,3 +124,19 @@ def test_wallet_blocks_are_fetched_only_where_transfers_are(data_dir: Path, reco
     args = recorded_cryo_calls[0]["args"]
     assert args[args.index("--blocks") + 1 : args.index("--columns")] == ["26239738", "26239739"]
     assert "--label" in args
+
+
+def test_a_wallet_also_fetches_the_blocks_of_its_pricing_swaps(data_dir: Path, recorded_cryo_calls):
+    # Only the second block has a transfer; the first only a swap. Both are fetched:
+    # a swap needs its block's time to be priced and valued.
+    for file in parquet_files(data_dir, "ethereum", BLOCKS):
+        file.unlink()
+    transfers = parquet_files(data_dir, "ethereum", ERC20_TRANSFERS)[0]
+    duckdb.execute(
+        f"COPY (SELECT * FROM read_parquet('{transfers}') WHERE block_number = 26239739) "
+        f"TO '{transfers}.tmp' (FORMAT parquet)"
+    )
+    Path(f"{transfers}.tmp").replace(transfers)
+    assert extract.extract_blocks_with_transfers(_settings(data_dir)) == 2
+    args = recorded_cryo_calls[0]["args"]
+    assert args[args.index("--blocks") + 1 : args.index("--columns")] == ["26239738", "26239739"]

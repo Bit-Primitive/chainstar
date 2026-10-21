@@ -34,7 +34,7 @@ from chainstar.datasets import ALL_DATASETS, parquet_files
 from chainstar.load import _select_distinct, attach
 from chainstar.model import DBT_PROJECT_DIR, MART_TABLES
 from chainstar.targets import DuckDBTarget
-from e2e_checks import ALL_CHAINS, load_and_build
+from e2e_checks import ALL_CHAINS, MODELS, load_and_build
 from sync_checks import snapshot
 
 ENDPOINT = os.environ.get("CHAINSTAR_TEST_BIGQUERY_EMULATOR")
@@ -105,18 +105,21 @@ def _load_raw(client, data_dir: Path) -> None:
                 f"{PROJECT}.chainstar_raw.{dataset.name}",
                 job_config=config,
             ).result(timeout=60)
-    seed = list(csv.DictReader((DBT_PROJECT_DIR / "seeds" / "chains.csv").open()))
-    _run(
-        client,
-        f"CREATE OR REPLACE TABLE `{PROJECT}.chainstar_staging.chains` "
-        "(chain_id INT64, chain STRING, native_symbol STRING, native_decimals INT64)",
-    )
-    values = ", ".join(
-        f"({row['chain_id'] or 'NULL'}, '{row['chain']}', '{row['native_symbol']}', "
-        f"{row['native_decimals']})"
-        for row in seed
-    )
-    _run(client, f"INSERT INTO `{PROJECT}.chainstar_staging.chains` VALUES {values}")
+    # The seeds, with the types _seeds.yml gives them: whole numbers as INT64.
+    integers = {"chain_id", "native_decimals", "decimals"}
+    for seed in sorted((DBT_PROJECT_DIR / "seeds").glob("*.csv")):
+        rows = list(csv.DictReader(seed.open()))
+        names = list(rows[0])
+        ddl = ", ".join(f"{n} {'INT64' if n in integers else 'STRING'}" for n in names)
+        _run(client, f"CREATE OR REPLACE TABLE `{PROJECT}.chainstar_staging.{seed.stem}` ({ddl})")
+
+        def literal(name: str, value: str) -> str:
+            if name in integers:
+                return value or "NULL"
+            return "'" + value + "'"
+
+        values = ", ".join("(" + ", ".join(literal(n, row[n]) for n in names) + ")" for row in rows)
+        _run(client, f"INSERT INTO `{PROJECT}.chainstar_staging.{seed.stem}` VALUES {values}")
 
 
 def _compiled(tmp_path: Path, mode: str) -> tuple[Path, list[dict]]:
@@ -158,7 +161,7 @@ def test_star_schema_sql_on_the_emulator(client, data_dir: Path, tmp_path: Path)
         kind = "VIEW" if node["config"]["materialized"] == "view" else "TABLE"
         relation = f"`{PROJECT}.{node['schema']}.{node['alias']}`"
         _run(client, f"CREATE OR REPLACE {kind} {relation} AS {_sql(root, node)}")
-    assert len(models) == 23
+    assert len(models) == MODELS
 
     reference = DuckDBTarget(tmp_path / "reference.duckdb")
     load_and_build(reference, data_dir, tmp_path / "dbt", chains=ALL_CHAINS)

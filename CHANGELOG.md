@@ -8,6 +8,44 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Added
 
+- **DEX swaps and USD prices**, from on-chain data only (no price service, nothing to
+  sign up for); see the README's "Swaps and USD prices".
+  - Ethereum and Base: Uniswap v2-style, Uniswap v3-style and Aerodrome `Swap` events,
+    extracted with cryo's `logs` dataset and decoded exactly by chainstar (raw tables
+    `chainstar_raw.dex_swaps`). Each pool's tokens and factory are read once with
+    `eth_call` (`chainstar_raw.dex_pools`), and a pool counts as a venue's (Uniswap v2
+    and v3, SushiSwap v2 and v3, Aerodrome, Aerodrome Slipstream) only when that factory
+    returns the pool for the same tokens and fee. Other pools with the same events are
+    kept as venue `unknown` and never priced.
+  - Solana: one swap per successful transaction that calls Raydium (AMM v4, CLMM,
+    CPMM), Orca Whirlpool, Meteora DLMM, Jupiter v6, Pump.fun or PumpSwap, derived from
+    the signer's token and SOL balance changes (`chainstar_raw.solana_swaps`).
+  - `fct_swaps`, `dim_pools` and `fct_token_prices`: hourly and daily USD prices per
+    asset, with USD stablecoins (by address) at 1 USD, other assets from their swaps
+    against stablecoins and the native asset (WETH, wrapped SOL), dust swaps dropped,
+    outliers more than 10% from the median rejected, the lower median as the price, and
+    observations, volume, sources and a confidence per row. Bitcoin is priced from
+    wrapped BTC (WBTC, cbBTC) on Ethereum and Base in the same hour, labelled
+    `cross_chain_wrapped_btc`, at most medium confidence. Low-confidence or missing
+    prices are NULL.
+  - `fct_transfers.amount_usd`, `fct_fees.fee_usd` and `fct_swaps.usd_value`, valued at
+    the hourly price, with the price, method, confidence and hour beside each. The
+    `transfers` export and `chainstar wallet` spreadsheets carry the same columns.
+  - `chainstar wallet` on Ethereum and Base looks up each token's pools against WETH and
+    USDC and fetches only those pools' swaps (filtered by address), so wallet histories
+    get USD values without reading every swap.
+  - All incremental under `sync`: each build recomputes prices from the start of the UTC
+    day of the earliest new block and revalues the newest hour's transfers, fees and
+    swaps; a rollback deletes swaps and prices too. Two syncs equal a full rebuild on
+    DuckDB, Postgres, ClickHouse and Parquet lakes; the models run on the BigQuery
+    emulator and compile for Snowflake.
+  - dbt tests for the new tables (keys, relationships to `dim_pools` and `dim_dates`,
+    accepted values, positive prices within their observed range), and two warnings:
+    a stablecoin more than 2% off its peg, and ETH more than 2% apart on Ethereum and
+    Base in the same hour.
+  - dbt variables for the pricing thresholds (`price_min_swap_usd`,
+    `price_outlier_band`, `price_high_*`, `price_medium_*`) and seeds `dex_venues` and
+    `price_assets` with every factory and anchor and where each address was published.
 - More targets. Each works with `run`, `sync` (progress, reorganisation rollbacks and
   incremental builds), `status` and `export`; see the README's Targets table for what was
   tested how.
@@ -52,6 +90,12 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Changed
 
+- The star-schema tables have new columns (USD values) and there are three new tables:
+  after upgrading, run `chainstar sync --full-refresh` once (or `chainstar run`), since
+  incremental builds refuse a changed schema. `chainstar run` now also extracts swaps
+  for its range; chunks extracted before have no swaps until extracted again.
+- `chainstar export --wallet` and `--token` filters are written as `col = ?` ORs, which
+  ClickHouse accepts where it refused `? IN (col, ...)`.
 - The dbt models are written for all seven targets: the SQL that differs (type names,
   Unix times, date parts and series, a quoted column) goes through dispatched macros, and
   qualified columns carry explicit names. On DuckDB and Postgres the tables, their

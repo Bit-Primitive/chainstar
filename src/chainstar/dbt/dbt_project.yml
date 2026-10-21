@@ -16,6 +16,17 @@ vars:
     base: 8453
     bitcoin: null
     solana: null
+  # USD prices from swaps (models/marts/fct_token_prices.sql, macros/prices.sql).
+  # Swaps worth less than this many USD are not used: their prices are mostly rounding.
+  price_min_swap_usd: 10
+  # Observations further than this fraction from the bucket's median are rejected.
+  price_outlier_band: 0.1
+  # Confidence: high needs all three; medium the first two of its own.
+  price_high_min_observations: 5
+  price_high_min_volume_usd: 10000
+  price_high_min_sources: 2
+  price_medium_min_observations: 3
+  price_medium_min_volume_usd: 1000
 
 flags:
   # chainstar sends no telemetry, and neither should dbt on its behalf.

@@ -19,6 +19,7 @@ from chainstar.redact import redact_url
 
 ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 3.0
+BATCH_RETRY_DELAY_SECONDS = 15.0
 # A Bitcoin block with input values is ~15 MB of JSON, a Solana block ~8 MB.
 TIMEOUT_SECONDS = 60.0
 # Read-only by design: only finalized Solana data, which cannot be rolled back.
@@ -69,11 +70,59 @@ class RpcClient:
                 attempt += 1
 
     def _call_once(self, method: str, params: list, exact_floats: bool) -> Any:
+        body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        payload = self._post(method, body, exact_floats=exact_floats)
+        # Bitcoin Core sends "error": null on success, so test the value, not the key.
+        if not isinstance(payload, dict) or payload.get("error") is not None:
+            error = payload.get("error") if isinstance(payload, dict) else payload
+            raise RpcError(f"{method} failed at {redact_url(self.url)}: {error}")
+        return payload.get("result")
+
+    def batch(self, calls: list[tuple[str, list]]) -> list[Any]:
+        """Send several calls in one JSON-RPC batch; return each result, or None if it failed.
+
+        A call that fails on its own (an eth_call that reverts, say) gives None; a
+        failure of the whole request is retried like call(). Each call in the
+        batch counts against the request-rate cap, since providers count them so.
+        """
+        if not calls:
+            return []
+        attempt = 1
+        while True:
+            try:
+                return self._batch_once(calls)
+            except RpcError:
+                if attempt >= self.attempts:
+                    raise
+                # Longer than for single calls: a batch is many requests at once, and
+                # public endpoints that refuse one tend to refuse for a while.
+                time.sleep(BATCH_RETRY_DELAY_SECONDS * attempt)
+                attempt += 1
+
+    def _batch_once(self, calls: list[tuple[str, list]]) -> list[Any]:
+        for _ in calls[1:]:
+            self._wait_for_rate_limit()
+        body = [
+            {"jsonrpc": "2.0", "id": index, "method": method, "params": params}
+            for index, (method, params) in enumerate(calls)
+        ]
+        payload = self._post("batch", body, exact_floats=False)
+        if not isinstance(payload, list):
+            # A single error object: the endpoint refused the batch as a whole.
+            error = payload.get("error") if isinstance(payload, dict) else payload
+            raise RpcError(f"batch of {len(calls)} calls failed at {redact_url(self.url)}: {error}")
+        results: list[Any] = [None] * len(calls)
+        for item in payload:
+            index = item.get("id") if isinstance(item, dict) else None
+            if isinstance(index, int) and 0 <= index < len(calls) and item.get("error") is None:
+                results[index] = item.get("result")
+        return results
+
+    def _post(self, method: str, body: Any, *, exact_floats: bool) -> Any:
         self._wait_for_rate_limit()
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
         request = urllib.request.Request(
             self.url,
-            data=body.encode(),
+            data=json.dumps(body).encode(),
             headers={
                 "Content-Type": "application/json",
                 "User-Agent": "chainstar",
@@ -86,7 +135,7 @@ class RpcClient:
                 raw = response.read()
                 if response.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
-            payload = json.loads(raw, parse_float=Decimal if exact_floats else float)
+            return json.loads(raw, parse_float=Decimal if exact_floats else float)
         except urllib.error.HTTPError as error:
             # Before URLError, its parent: the status says whether we were rate limited
             # (429) or refused, which the user can act on.
@@ -99,11 +148,6 @@ class RpcClient:
             raise RpcError(
                 f"{method}: could not reach {redact_url(self.url)} ({type(error).__name__})"
             ) from None
-        # Bitcoin Core sends "error": null on success, so test the value, not the key.
-        if not isinstance(payload, dict) or payload.get("error") is not None:
-            error = payload.get("error") if isinstance(payload, dict) else payload
-            raise RpcError(f"{method} failed at {redact_url(self.url)}: {error}")
-        return payload.get("result")
 
     def _wait_for_rate_limit(self) -> None:
         wait = self._last_request + self._min_interval - time.monotonic()

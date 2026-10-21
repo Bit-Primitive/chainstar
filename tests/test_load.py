@@ -32,7 +32,14 @@ def _raw_count(path: Path, table: str) -> int:
 def test_load_counts_and_types(data_dir: Path, tmp_path: Path):
     target = DuckDBTarget(tmp_path / "w.duckdb")
     counts = load_raw(target, data_dir, ETHEREUM)
-    assert counts == {"blocks": 2, "transactions": 50, "erc20_transfers": 562, "erc20_metadata": 11}
+    assert counts == {
+        "blocks": 2,
+        "transactions": 50,
+        "erc20_transfers": 562,
+        "dex_swaps": 54,
+        "erc20_metadata": 11,
+        "dex_pools": 37,
+    }
     with duckdb.connect(str(target.path), read_only=True) as connection:
         types = dict(
             connection.execute(
@@ -99,6 +106,7 @@ def test_json_rpc_chains_load_by_chain_name(data_dir: Path, tmp_path: Path):
         "solana_blocks": 2,
         "solana_transactions": 12,
         "solana_transfers": 20,
+        "solana_swaps": 3,
     }
     # Every raw table exists after any load, so dbt sources always resolve.
     assert _raw_count(target.path, "erc20_transfers") == 0
@@ -168,6 +176,6 @@ def test_delete_from_block_and_stored_blocks(data_dir: Path, tmp_path: Path):
         assert [b.number for b in newest] == [26239739, 26239738]
         assert newest[0].hash.startswith("0x") and newest[0].time > 1_700_000_000
         deleted = delete_from_block(warehouse, ETHEREUM, 26239739)
-    assert deleted == 21 + 25 + 1  # transfers, transactions and the block
+    assert deleted == 21 + 27 + 25 + 1  # transfers, swaps, transactions and the block
     assert _count(target, "erc20_metadata") == 11  # metadata belongs to no block
     assert _count(target, "blocks") == 1

@@ -207,7 +207,8 @@ def test_reorg_rolls_back_and_resyncs(eth: Run):
     text = eth.text()
     assert f"block 26,239,739 now has hash {NEW_HASH[:10]}" in text
     assert f"not {old_hash[:10]}" in text
-    assert "rolled back from block 26,239,739: deleted 3 chunk files" in text
+    # Transfers, swaps, blocks and transactions: one chunk file each.
+    assert "rolled back from block 26,239,739: deleted 4 chunk files" in text
     state = eth.state()
     assert (state.last_block, state.checkpoint_hash) == (LAST, NEW_HASH)
     # The reorganised block is synced again from the new fork; the block before

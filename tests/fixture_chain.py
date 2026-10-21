@@ -12,15 +12,15 @@ from pathlib import Path
 
 import duckdb
 
-from chainstar.chains import EVM, Chain
+from chainstar.chains import Chain
 from chainstar.chunks import chunk_path, chunk_ranges
 from chainstar.config import RunSettings
 from chainstar.datasets import (
     ALL_DATASETS,
     BLOCK_TIME_COLUMN,
-    ERC20_METADATA,
     blocks_dataset,
     dataset_dir,
+    metadata_datasets_for,
     parquet_files,
     ranged_datasets_for,
 )
@@ -151,8 +151,8 @@ class FixtureSource:
                         connection.execute(f"COPY ({query}) TO '{path}' (FORMAT parquet)", [files])
                     row = connection.execute(f"SELECT count(*) FROM ({query})", [files]).fetchone()
                     counts[dataset.name] += row[0]
-        if self.chain.family == EVM:
-            metadata = dataset_dir(settings.data_dir, self.chain.name, ERC20_METADATA)
+        for dataset in metadata_datasets_for(self.chain):
+            metadata = dataset_dir(settings.data_dir, self.chain.name, dataset)
             if not metadata.exists():
-                shutil.copytree(dataset_dir(self.source, self.chain.name, ERC20_METADATA), metadata)
+                shutil.copytree(dataset_dir(self.source, self.chain.name, dataset), metadata)
         report(Stage("extract", counts, 0.0))

@@ -134,6 +134,7 @@ def test_run_into_a_lake_publishes_after_the_build(node, monkeypatch, data_dir: 
     run_pipeline(settings, lines.append)
     publish = next(line for line in lines if line.startswith("publish"))
     # One partition per table: one chain, one day. 562 + 50 + 581 + 11 + 11 + 1 rows.
-    assert "parquet lake     6 partitions written (1,216 rows), 0 unchanged" in publish
+    # The six tables of before (1,216 rows), and swaps, prices and pools.
+    assert "parquet lake     9 partitions written (1,317 rows), 0 unchanged" in publish
     assert any(line.split() == ["fct_transfers", "562"] for line in lines)
     assert (tmp_path / "lake/chainstar/fct_transfers/chain=ethereum").is_dir()

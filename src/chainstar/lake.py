@@ -5,7 +5,8 @@ R2, MinIO), with the Hive layout DuckDB, Spark, Athena and Trino read:
 
     LAKE/chainstar/fct_transfers/chain=base/date_day=2026-10-21/data_0.parquet
     LAKE/chainstar/fct_fees/chain=base/date_day=2026-10-21/data_0.parquet
-    LAKE/chainstar/dim_wallets/chain=base/data_0.parquet     (and dim_tokens, dim_contracts)
+    LAKE/chainstar/fct_swaps/chain=base/date_day=2026-10-21/data_0.parquet  (and fct_token_prices)
+    LAKE/chainstar/dim_wallets/chain=base/data_0.parquet     (and the other dims but dim_dates)
     LAKE/chainstar/dim_dates/data_0.parquet
     LAKE/chainstar_state/sync_progress/data_0.parquet
     LAKE/_chainstar/published.parquet                        (what was published, below)
@@ -51,9 +52,12 @@ from chainstar.targets import LakeTarget
 PARTITIONS: dict[str, tuple[str, ...]] = {
     "fct_transfers": ("chain", "date_day"),
     "fct_fees": ("chain", "date_day"),
+    "fct_swaps": ("chain", "date_day"),
+    "fct_token_prices": ("chain", "date_day"),
     "dim_wallets": ("chain",),
     "dim_tokens": ("chain",),
     "dim_contracts": ("chain",),
+    "dim_pools": ("chain",),
     "dim_dates": (),
 }
 assert set(PARTITIONS) == set(MART_TABLES)

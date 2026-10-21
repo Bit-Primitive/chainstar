@@ -3,6 +3,8 @@ select
     blocks.chain_id as chain_id,
     blocks.block_number as block_number,
     blocks.block_hash as block_hash,
+    -- Unix seconds, for the hour and day buckets of USD prices.
+    blocks.{{ chainstar.quoted('timestamp') }} as block_time_unix,
     {{ chainstar.unix_to_utc_timestamp('blocks.' ~ chainstar.quoted('timestamp')) }} as block_timestamp,
     cast({{ chainstar.unix_to_utc_timestamp('blocks.' ~ chainstar.quoted('timestamp')) }} as date) as block_date,
     blocks.base_fee_per_gas as base_fee_per_gas,

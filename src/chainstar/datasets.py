@@ -26,6 +26,9 @@ class Dataset:
     family: str = EVM
     # The column that places a row in the extracted range.
     block_column: str = "block_number"
+    # False for datasets read once per item rather than per block (token and pool
+    # metadata): they are replaced in full on every load and never rolled back.
+    ranged: bool = True
 
     @property
     def column_names(self) -> tuple[str, ...]:
@@ -94,14 +97,69 @@ ERC20_METADATA = Dataset(
         ("decimals", "BIGINT"),
         ("chain_id", "BIGINT"),
     ),
+    ranged=False,
 )
 
-# Datasets extracted for the block range. Token metadata is not one of them: it is
-# read at the chain head for the tokens the transfers mention.
-# Transfers go first: some RPC providers (including free public endpoints) answer
-# log queries only for recent blocks, so they are fetched while the range is newest.
-RANGED_DATASETS = (ERC20_TRANSFERS, BLOCKS, TRANSACTIONS)
-EVM_DATASETS = (*RANGED_DATASETS, ERC20_METADATA)
+# One row per DEX swap event (see venues.py for the three event layouts), decoded
+# by chainstar from the logs cryo extracts. The pool's own amounts are kept as
+# exact base-10 strings; zero_for_one, amount_in and amount_out are the net
+# direction: token0 in and token1 out when zero_for_one, NULL when the event's
+# amounts show no single direction (both net in, or both net out).
+DEX_SWAPS = Dataset(
+    name="dex_swaps",
+    columns=(
+        ("block_number", "BIGINT"),
+        ("transaction_index", "BIGINT"),
+        ("log_index", "BIGINT"),
+        ("transaction_hash", "VARCHAR"),
+        ("pool", "VARCHAR"),
+        ("event_family", "VARCHAR"),
+        ("sender", "VARCHAR"),
+        ("recipient", "VARCHAR"),
+        ("amount0_in", "VARCHAR"),
+        ("amount1_in", "VARCHAR"),
+        ("amount0_out", "VARCHAR"),
+        ("amount1_out", "VARCHAR"),
+        ("zero_for_one", "BOOLEAN"),
+        ("amount_in", "VARCHAR"),
+        ("amount_out", "VARCHAR"),
+        # Uniswap v3-style pools only: the pool's state after the swap.
+        ("sqrt_price_x96", "VARCHAR"),
+        ("liquidity", "VARCHAR"),
+        ("tick", "BIGINT"),
+        ("chain_id", "BIGINT"),
+    ),
+)
+
+# One row per pool, read with eth_call at block_number (the chain head when read),
+# once per pool, like token metadata. factory_confirms: the factory the pool names
+# returns this pool's address for the same tokens (and fee, tick spacing or
+# stable flag), so the pool really is one of that factory's.
+DEX_POOLS = Dataset(
+    name="dex_pools",
+    columns=(
+        ("block_number", "BIGINT"),
+        ("pool", "VARCHAR"),
+        ("event_family", "VARCHAR"),
+        ("factory", "VARCHAR"),
+        ("token0", "VARCHAR"),
+        ("token1", "VARCHAR"),
+        ("fee", "BIGINT"),
+        ("tick_spacing", "BIGINT"),
+        ("stable", "BOOLEAN"),
+        ("factory_confirms", "BOOLEAN"),
+        ("chain_id", "BIGINT"),
+    ),
+    ranged=False,
+)
+
+# Datasets extracted for the block range. Token and pool metadata are not: they
+# are read at the chain head for the tokens and pools the range mentions.
+# Logs go first: some RPC providers (including free public endpoints) answer log
+# queries only for recent blocks, so they are fetched while the range is newest.
+RANGED_DATASETS = (ERC20_TRANSFERS, DEX_SWAPS, BLOCKS, TRANSACTIONS)
+METADATA_DATASETS = (ERC20_METADATA, DEX_POOLS)
+EVM_DATASETS = (*RANGED_DATASETS, *METADATA_DATASETS)
 
 # Bitcoin amounts are whole satoshis. The largest possible (21 million BTC) is
 # about 2.1e15, well inside BIGINT.
@@ -247,7 +305,32 @@ SOLANA_TRANSFERS = Dataset(
     ),
 )
 
-SOLANA_DATASETS = (SOLANA_BLOCKS, SOLANA_TRANSACTIONS, SOLANA_TRANSFERS)
+# One row per swap chainstar derives from a successful transaction that calls a
+# known DEX program (venues.SOLANA_DEX_PROGRAMS): what one signer gave and got,
+# from the transaction's balance changes (see solana.py). SOL and wrapped SOL are
+# one asset, "native". Amounts are base-10 strings in the asset's smallest unit.
+SOLANA_SWAPS = Dataset(
+    name="solana_swaps",
+    family=SOLANA,
+    block_column="slot",
+    columns=(
+        ("chain", "VARCHAR"),
+        ("slot", "BIGINT"),
+        ("transaction_index", "BIGINT"),
+        ("signature", "VARCHAR"),
+        ("trader", "VARCHAR"),
+        # The known DEX programs the transaction called, e.g. "jupiter_v6+raydium_clmm".
+        ("venues", "VARCHAR"),
+        ("token_in", "VARCHAR"),
+        ("amount_in", "VARCHAR"),
+        ("decimals_in", "BIGINT"),
+        ("token_out", "VARCHAR"),
+        ("amount_out", "VARCHAR"),
+        ("decimals_out", "BIGINT"),
+    ),
+)
+
+SOLANA_DATASETS = (SOLANA_BLOCKS, SOLANA_TRANSACTIONS, SOLANA_TRANSFERS, SOLANA_SWAPS)
 
 ALL_DATASETS = (*EVM_DATASETS, *BITCOIN_DATASETS, *SOLANA_DATASETS)
 
@@ -257,8 +340,13 @@ def datasets_for(chain: Chain) -> tuple[Dataset, ...]:
 
 
 def ranged_datasets_for(chain: Chain) -> tuple[Dataset, ...]:
-    """The chain's datasets whose rows belong to a block: all but token metadata."""
-    return tuple(dataset for dataset in datasets_for(chain) if dataset is not ERC20_METADATA)
+    """The chain's datasets whose rows belong to a block: all but token and pool metadata."""
+    return tuple(dataset for dataset in datasets_for(chain) if dataset.ranged)
+
+
+def metadata_datasets_for(chain: Chain) -> tuple[Dataset, ...]:
+    """The chain's datasets read once per token or pool, replaced in full on each load."""
+    return tuple(dataset for dataset in datasets_for(chain) if not dataset.ranged)
 
 
 def blocks_dataset(chain: Chain) -> Dataset:

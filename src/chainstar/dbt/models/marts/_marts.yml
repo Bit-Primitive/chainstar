@@ -100,6 +100,23 @@ models:
         description: >
           amount_raw divided by 10^decimals, as double precision (about 15 significant
           digits). NULL when the token's decimals are unknown.
+      - name: amount_usd
+        description: >
+          amount at usd_price, the token's on-chain USD price for the block's UTC hour
+          (fct_token_prices; WETH and wrapped SOL as ETH and SOL). NULL when the token
+          has no price that hour with confidence peg, high or medium.
+      - name: usd_price
+        description: The hourly USD price used, from fct_token_prices.
+      - name: price_method
+        description: How that price was derived (see fct_token_prices.price_method).
+      - name: price_confidence
+        description: peg, high or medium; NULL when unpriced.
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["peg", "high", "medium"]
+      - name: price_bucket_start
+        description: Start (UTC) of the hour whose price was used.
 
   - name: fct_fees
     description: >
@@ -175,6 +192,211 @@ models:
         description: fee_raw in whole native units (ETH, BTC, SOL), as double precision.
       - name: execution_fee_native
         description: EVM only. execution_fee_wei in ETH, as double precision.
+      - name: fee_usd
+        description: >
+          fee_native at the native asset's on-chain USD price for the block's UTC hour
+          (fct_token_prices); NULL when unpriced.
+      - name: native_usd_price
+        description: The hourly USD price of ETH, BTC or SOL used.
+      - name: price_method
+      - name: price_confidence
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["peg", "high", "medium"]
+      - name: price_bucket_start
+        description: Start (UTC) of the hour whose price was used.
+
+  - name: fct_swaps
+    description: >
+      One row per DEX swap. Ethereum and Base: a decoded Uniswap v2-style, Uniswap
+      v3-style or Aerodrome Swap event. Solana: what one signer gave and got in a
+      successful transaction that called a known DEX program, from its balance
+      changes.
+    columns:
+      - name: swap_id
+        description: "chain:transaction_hash:swap_position"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ethereum", "base", "solana"]
+      - name: block_number
+        data_tests: [not_null]
+      - name: block_timestamp
+        data_tests: [not_null]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_day
+      - name: transaction_hash
+        data_tests: [not_null]
+      - name: swap_position
+        description: The log index (EVM); "0" on Solana, one swap per transaction.
+        data_tests: [not_null]
+      - name: venue
+        description: >
+          EVM: the venue of the pool's factory (uniswap_v2, uniswap_v3, sushiswap_v2,
+          sushiswap_v3, aerodrome_v2, aerodrome_slipstream), or 'unknown'. Solana: the
+          known DEX programs the transaction called, joined with '+'.
+        data_tests: [not_null]
+      - name: swap_method
+        description: uniswap_v2, uniswap_v3 or solidly_v2 (the event layout), or balance_changes (Solana).
+      - name: pool_id
+        description: EVM only. Joins to dim_pools.
+        data_tests:
+          - not_null:
+              config:
+                where: "chain in ('ethereum', 'base')"
+          - relationships:
+              arguments:
+                to: ref('dim_pools')
+                field: pool_id
+      - name: pool_verified
+        description: EVM only. The pool's factory is a known venue and confirms the pool.
+      - name: trader
+        description: EVM, the transaction's sender (NULL in a wallet history); Solana, the signer.
+      - name: sender
+        description: EVM only. The event's sender, usually a router.
+      - name: recipient
+        description: EVM only. The event's recipient of the output.
+      - name: token_in_id
+        data_tests: [not_null]
+      - name: token_out_id
+        data_tests: [not_null]
+      - name: token_in_address
+        description: What the trader paid; 'native' for SOL (and wrapped SOL) on Solana.
+      - name: token_out_address
+        description: What the trader received.
+      - name: amount_in_raw
+        description: Exact amount paid, in the token's smallest unit.
+        data_tests: [not_null]
+      - name: amount_out_raw
+        data_tests: [not_null]
+      - name: amount_in
+        description: amount_in_raw / 10^decimals; NULL when decimals are unknown.
+      - name: amount_out
+      - name: usd_value
+        description: >
+          The swap's USD value, from the hourly price of one side (a stablecoin side
+          first, then the native asset, then token_in); NULL when unpriced or on EVM
+          when the pool is not verified.
+      - name: usd_value_side
+        description: in or out, the side usd_value comes from.
+      - name: price_method
+      - name: price_confidence
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["peg", "high", "medium"]
+      - name: price_bucket_start
+
+  - name: fct_token_prices
+    description: >
+      USD prices per asset, UTC hour and UTC day, derived from on-chain swaps only:
+      USD stablecoins at 1 USD, other assets from their swaps against those and
+      against the native asset, outliers rejected, with the number of observations,
+      volume and a confidence. Bitcoin from wrapped BTC on Ethereum and Base.
+    columns:
+      - name: price_id
+        description: "chain:token_address:granularity:bucket_start_unix"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [not_null]
+      - name: token_address
+        description: The asset; 'native' for ETH, BTC and SOL (WETH and wrapped SOL are priced as these).
+        data_tests: [not_null]
+      - name: token_id
+        description: "chain:token_address"
+      - name: granularity
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["hour", "day"]
+      - name: bucket_start
+        description: Start of the UTC hour or day.
+        data_tests: [not_null]
+      - name: date_day
+      - name: bucket_start_unix
+      - name: usd_price
+        description: >
+          The price chainstar values things at: 1 for stablecoins, the observed price
+          when confidence is high or medium, NULL otherwise.
+      - name: observed_price
+        description: Lower median of the observations kept; for stablecoins, from swaps against other stablecoins.
+      - name: price_low
+        description: Lowest observation kept.
+      - name: price_high
+        description: Highest observation kept.
+      - name: price_method
+        description: >
+          usd_stablecoin_peg, swaps_vs_stablecoins, swaps_vs_native,
+          swaps_vs_stablecoins_and_native, or cross_chain_wrapped_btc (Bitcoin).
+        data_tests:
+          - accepted_values:
+              arguments:
+                values:
+                  - usd_stablecoin_peg
+                  - swaps_vs_stablecoins
+                  - swaps_vs_native
+                  - swaps_vs_stablecoins_and_native
+                  - cross_chain_wrapped_btc
+      - name: confidence
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["peg", "high", "medium", "low", "none"]
+      - name: observations
+        description: Swaps kept (at least price_min_swap_usd, within price_outlier_band of the median).
+      - name: rejected_observations
+      - name: volume_usd
+        description: USD volume of the swaps kept, in cents.
+      - name: sources
+        description: Distinct pools (EVM) or traders (Solana) among the swaps kept.
+      - name: last_block_number
+        description: The chain's newest block in the bucket.
+
+  - name: dim_pools
+    description: >
+      Every pool that emitted a swap event on Ethereum or Base, with its tokens,
+      factory and fee as read from the contracts at the chain head.
+    columns:
+      - name: pool_id
+        description: "chain:pool_address"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [not_null]
+      - name: pool_address
+        data_tests: [not_null]
+      - name: venue
+        description: The factory's venue (see fct_swaps.venue), or 'unknown'.
+      - name: event_family
+      - name: factory_address
+        description: What the pool's factory() returned.
+      - name: factory_confirms
+        description: The factory returns this pool for the same tokens (and fee, tick spacing or stable flag).
+      - name: is_verified
+        description: factory_confirms, and the factory is a known venue. Only verified pools price tokens.
+      - name: token0_address
+      - name: token1_address
+      - name: token0_id
+      - name: token1_id
+      - name: fee
+        description: Uniswap v3-style pools, fee() as read, in hundredths of a basis point (500 = 0.05%).
+      - name: tick_spacing
+      - name: is_stable
+        description: Aerodrome pools only, stable() as read.
+      - name: metadata_block_number
+      - name: first_seen_block
+      - name: last_seen_block
+      - name: swap_events
 
   - name: dim_wallets
     description: >

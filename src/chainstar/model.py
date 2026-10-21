@@ -23,9 +23,12 @@ MART_SCHEMA = "chainstar"
 MART_TABLES = [
     "fct_transfers",
     "fct_fees",
+    "fct_swaps",
+    "fct_token_prices",
     "dim_wallets",
     "dim_tokens",
     "dim_contracts",
+    "dim_pools",
     "dim_dates",
 ]
 

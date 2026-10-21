@@ -14,3 +14,37 @@ seeds:
         data_tests: [unique]
       - name: chain
         data_tests: [unique, not_null]
+
+  - name: dex_venues
+    description: >
+      DEX factories whose pools chainstar names as venues, with the event layout
+      their pools emit. Kept in step with chainstar/venues.py by a unit test.
+    config:
+      column_types:
+        chain: "{{ 'string' if target.type == 'bigquery' else 'varchar(32)' }}"
+        factory_address: "{{ 'string' if target.type == 'bigquery' else 'varchar(64)' }}"
+        venue: "{{ 'string' if target.type == 'bigquery' else 'varchar(64)' }}"
+        event_family: "{{ 'string' if target.type == 'bigquery' else 'varchar(32)' }}"
+    columns:
+      - name: factory_address
+        data_tests: [not_null]
+
+  - name: price_assets
+    description: >
+      The assets USD prices are anchored to, by contract address or mint: USD
+      stablecoins (taken at 1 USD), each chain's wrapped native token (priced as the
+      native asset) and wrapped BTC (which prices Bitcoin). Kept in step with
+      chainstar/venues.py by a unit test.
+    config:
+      column_types:
+        chain: "{{ 'string' if target.type == 'bigquery' else 'varchar(32)' }}"
+        token_address: "{{ 'string' if target.type == 'bigquery' else 'varchar(64)' }}"
+        role: "{{ 'string' if target.type == 'bigquery' else 'varchar(32)' }}"
+        symbol: "{{ 'string' if target.type == 'bigquery' else 'varchar(16)' }}"
+        decimals: integer
+    columns:
+      - name: role
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["usd_stablecoin", "wrapped_native", "wrapped_btc"]

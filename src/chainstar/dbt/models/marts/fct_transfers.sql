@@ -2,12 +2,17 @@
 -- (Bitcoin), or a transfer instruction of a successful transaction (Solana).
 -- Left joins on purpose: a transfer whose block or token is missing should fail the
 -- not_null and relationship tests, not quietly disappear.
+-- amount_usd: amount times the token's hourly USD price in fct_token_prices for
+-- the block's UTC hour, when that price's confidence is peg, high or medium;
+-- NULL otherwise. The price columns say which price was used.
 {{ config(
     unique_key='transfer_id',
     indexes=chainstar.incremental_indexes('transfer_id', 'block_number'),
 ) }}
 
-{%- set marks = chainstar.watermarks('block_number') %}
+{#- Besides new blocks, the rows of the newest hour are valued again: its price
+    may have changed (see valuation_marks in macros/prices.sql). -#}
+{%- set marks = chainstar.valuation_marks(chainstar.watermarks('block_number')) %}
 
 select
     {{ chainstar.chain_key('transfers.chain', 'transfers.transaction_hash', 'transfers.transfer_position') }} as transfer_id,
@@ -37,7 +42,16 @@ select
     case
         when tokens.decimals between 0 and 255
             then cast(transfers.amount_raw as {{ chainstar.type_double() }}) / power(10, tokens.decimals)
-    end as amount
+    end as amount,
+    case
+        when tokens.decimals between 0 and 255
+            then cast(transfers.amount_raw as {{ chainstar.type_double() }}) / power(10, tokens.decimals)
+                * prices.usd_price
+    end as amount_usd,
+    prices.usd_price as usd_price,
+    prices.price_method as price_method,
+    prices.confidence as price_confidence,
+    prices.bucket_start as price_bucket_start
 from ({{ chainstar.int_transfers(marks) }}) as transfers
 left join ({{ chainstar.int_blocks(marks) }}) as blocks
     on blocks.chain = transfers.chain
@@ -45,3 +59,13 @@ left join ({{ chainstar.int_blocks(marks) }}) as blocks
 left join {{ ref('dim_tokens') }} as tokens
     on tokens.chain = transfers.chain
     and tokens.token_address = transfers.token_address
+left join {{ ref('price_assets') }} as assets
+    on assets.chain = transfers.chain
+    and assets.token_address = transfers.token_address
+left join {{ ref('fct_token_prices') }} as prices
+    on prices.price_id = {{ chainstar.hourly_price_id(
+        'transfers.chain',
+        chainstar.priced_asset('transfers.token_address', 'assets'),
+        'blocks.block_time_unix'
+    ) }}
+    and prices.usd_price is not null

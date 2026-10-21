@@ -16,6 +16,13 @@ RATE_LIMIT_HINT = (
 _HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("rate limited", "http 429", "too many requests"), RATE_LIMIT_HINT),
     (
+        ("answered http 403",),
+        "the RPC endpoint refused the request: a free public endpoint does this for a while "
+        "after many requests, so wait a few minutes and run the same command again (finished "
+        "chunks, and pools and tokens already read, are kept); with your own RPC URL, check "
+        "its key or plan",
+    ),
+    (
         ("could not reach",),
         "check your internet connection and the RPC URL; a free public endpoint may also be "
         "down for a while, so try again later or use your own RPC URL",

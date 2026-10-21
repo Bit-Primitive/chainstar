@@ -155,3 +155,31 @@ def test_http_status_is_reported_and_rate_limits_named(server):
         RpcClient(SECRET_URL, attempts=1).call("getBlock")
     assert "answered HTTP 429 (too many requests: rate limited)" in str(raised.value)
     assert "supersecretkey" not in str(raised.value)
+
+
+def test_batch_returns_results_in_order_and_none_for_failed_calls(server):
+    # The reply lists results out of order; one call reverted.
+    server["replies"].append(
+        FakeResponse(
+            json.dumps(
+                [
+                    {"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "reverted"}},
+                    {"jsonrpc": "2.0", "id": 0, "result": "0x01"},
+                    {"jsonrpc": "2.0", "id": 2, "result": "0x03"},
+                ]
+            ).encode()
+        )
+    )
+    calls = [("eth_call", [{"to": "0x1"}, "latest"])] * 3
+    assert RpcClient("https://rpc.example").batch(calls) == ["0x01", None, "0x03"]
+    assert [item["id"] for item in server["requests"][0]] == [0, 1, 2]
+
+
+def test_a_refused_batch_is_retried_then_reported(server):
+    refused = urllib.error.HTTPError("https://rpc.example", 403, "Forbidden", {}, None)
+    server["replies"] += [refused, _reply({"jsonrpc": "2.0", "id": 0, "error": "no batches"})]
+    server["replies"].append(FakeResponse(b'[{"jsonrpc": "2.0", "id": 0, "result": "0x2"}]'))
+    assert RpcClient("https://rpc.example").batch([("eth_chainId", [])]) == ["0x2"]
+    server["replies"] += [refused] * 3
+    with pytest.raises(RpcError, match="answered HTTP 403"):
+        RpcClient("https://rpc.example").batch([("eth_chainId", [])])

@@ -108,7 +108,7 @@ def test_filters_that_do_not_apply_are_refused(warehouse, tmp_path: Path):
     with pytest.raises(ExportError, match="--wallet does not apply to dim_tokens"):
         export(warehouse, ExportRequest("dim_tokens", tmp_path / "x.csv", "csv", wallet="0x1"))
     with pytest.raises(ExportError, match="unknown table"):
-        export(warehouse, ExportRequest("fct_swaps", tmp_path / "x.csv", "csv"))
+        export(warehouse, ExportRequest("fct_nft_transfers", tmp_path / "x.csv", "csv"))
 
 
 def test_missing_warehouse_is_explained_and_not_created(tmp_path: Path):

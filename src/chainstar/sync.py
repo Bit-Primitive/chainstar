@@ -74,15 +74,24 @@ from chainstar.state import (
     utc_now,
     write_state,
 )
+from chainstar.swaps import decode_pool_metadata, extract_wallet_pricing_swaps
 from chainstar.synclog import ALL_CHAINS, SyncLog, block_span, describe_counts
 from chainstar.targets import LakeTarget, Target
 
 # Blocks per batch, in chunks. Each batch is loaded and its progress committed on
 # its own, so a long catch-up keeps what it has done if it stops half-way.
 CHUNKS_PER_BATCH = 10
-# Fact tables hold one row per block-bound event; a rollback deletes theirs too,
-# so the marts never show a reorganised-away block, even before the rebuild.
-FACT_TABLES = ("fct_transfers", "fct_fees")
+# Fact tables hold rows bound to blocks; a rollback deletes theirs too, so the
+# marts never show a reorganised-away block, even before the rebuild. Each with
+# the column that holds the block. A price's last_block_number is the chain's
+# newest block in its time bucket; prices of other chains derived from this
+# one's swaps (Bitcoin's, from wrapped BTC) are corrected by the rebuild.
+FACT_TABLES = {
+    "fct_transfers": "block_number",
+    "fct_fees": "block_number",
+    "fct_swaps": "block_number",
+    "fct_token_prices": "last_block_number",
+}
 LOCK_FILE = ".chainstar-sync.lock"
 
 
@@ -151,21 +160,28 @@ class RpcSource(ChainNode):
             report(Stage("extract", counts, time.monotonic() - started))
             return
         if settings.wallet:
-            counts = {
-                "erc20_transfers": extract_wallet_transfers(settings, settings.wallet),
-                "blocks fetched": extract_blocks_with_transfers(settings),
-            }
+            counts = {"erc20_transfers": extract_wallet_transfers(settings, settings.wallet)}
+            pools, counts["dex_swaps"] = extract_wallet_pricing_swaps(settings)
+            counts["pricing pools"] = pools
+            # After the swaps: their blocks are needed too, for their times.
+            counts["blocks fetched"] = extract_blocks_with_transfers(settings)
         else:
             counts = {
                 dataset.name: extract_dataset(settings, dataset) for dataset in RANGED_DATASETS
             }
         report(Stage("extract", counts, time.monotonic() - started))
         started = time.monotonic()
+        pools_seen, pools_fetched = decode_pool_metadata(settings)
         metadata = decode_token_metadata(settings)
         report(
             Stage(
                 "decode",
-                {"tokens": metadata.tokens_seen, "fetched": metadata.tokens_fetched},
+                {
+                    "pools": pools_seen,
+                    "pools fetched": pools_fetched,
+                    "tokens": metadata.tokens_seen,
+                    "fetched": metadata.tokens_fetched,
+                },
                 time.monotonic() - started,
             )
         )
@@ -533,11 +549,11 @@ class Syncer:
         with attach(self.plan.target) as warehouse, transaction(warehouse):
             raw_rows = delete_from_block(warehouse, chain, start)
             fact_rows = 0
-            for table in FACT_TABLES:
+            for table, column in FACT_TABLES.items():
                 if warehouse.has_table(MART_SCHEMA, table):
                     fact_rows += warehouse.delete(
                         warehouse.table(MART_SCHEMA, table),
-                        "chain = ? AND block_number >= ?",
+                        f"chain = ? AND {warehouse.quote(column)} >= ?",
                         [chain.name, start],
                     )
             remaining = stored_blocks(warehouse, chain, start - 1, 1)

@@ -8,19 +8,19 @@
 
 {# Every loaded block of every chain. On Solana, block_number is the slot. #}
 {% macro int_blocks(marks=none) %}
-select chain, block_number, block_hash, block_timestamp, block_date
+select chain, block_number, block_hash, block_timestamp, block_date, block_time_unix
 from {{ ref('stg_blocks') }}
 where {{ chainstar.after_watermark(marks, 'evm') }}
 
 union all
 
-select chain, block_number, block_hash, block_timestamp, block_date
+select chain, block_number, block_hash, block_timestamp, block_date, block_time_unix
 from {{ ref('stg_bitcoin_blocks') }}
 where {{ chainstar.after_watermark(marks, 'bitcoin') }}
 
 union all
 
-select chain, slot, block_hash, block_timestamp, block_date
+select chain, slot, block_hash, block_timestamp, block_date, block_time_unix
 from {{ ref('stg_solana_blocks') }}
 where {{ chainstar.after_watermark(marks, 'solana', 'slot') }}
 {% endmacro %}

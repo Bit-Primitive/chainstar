@@ -1,10 +1,14 @@
 """The extract and decode stages for EVM chains: cryo pulls chain data into Parquet files.
 
-extract: blocks, transactions and ERC-20 Transfer events for the block range.
-         cryo decodes each Transfer log into token, from, to and value as it goes.
-         For one wallet (`chainstar wallet`), only the Transfer events it sent or
-         received, and only the blocks those happened in.
-decode:  for every token contract seen, cryo calls name(), symbol() and decimals().
+extract: blocks, transactions, ERC-20 Transfer events and DEX Swap events for the
+         block range. cryo decodes each Transfer log into token, from, to and
+         value as it goes; swaps are decoded by chainstar (swaps.py). For one
+         wallet (`chainstar wallet`), only the Transfer events it sent or
+         received, the blocks those happened in, and the swaps of the pools
+         that price its tokens.
+decode:  for every pool seen, its tokens and factory (swaps.py); for every token
+         contract seen in a transfer or a pool, cryo calls name(), symbol() and
+         decimals().
 """
 
 import hashlib
@@ -18,6 +22,7 @@ from chainstar.config import RunSettings
 from chainstar.cryo import run_cryo
 from chainstar.datasets import (
     BLOCKS,
+    DEX_SWAPS,
     ERC20_METADATA,
     ERC20_TRANSFERS,
     Dataset,
@@ -35,6 +40,11 @@ def extract_dataset(settings: RunSettings, dataset: Dataset) -> int:
     cryo skips chunk files that already exist, so re-running a range reuses what
     is on disk instead of hitting the RPC again.
     """
+    if dataset is DEX_SWAPS:
+        # Imported here: swaps.py imports chunks.py, which imports this module.
+        from chainstar.swaps import extract_swaps
+
+        return extract_swaps(settings)
     run_cryo(
         dataset.name,
         rpc_url=settings.rpc_url,
@@ -106,14 +116,18 @@ def extract_wallet_transfers(settings: RunSettings, wallet: str) -> int:
 
 
 def extract_blocks_with_transfers(settings: RunSettings) -> int:
-    """Fetch the blocks that contain a saved transfer and are not on disk yet.
+    """Fetch the blocks that contain a saved transfer or swap and are not on disk yet.
 
-    The star schema needs each transfer's block for its timestamp; in wallet mode
-    that is usually a small fraction of the range. Returns the number fetched.
+    The star schema needs each transfer's and swap's block for its timestamp; in
+    wallet mode that is usually a small fraction of the range. Returns the number
+    fetched.
     """
     chain = settings.chain.name
     transfer_files = parquet_files(settings.data_dir, chain, ERC20_TRANSFERS)
-    needed = distinct_values(transfer_files, "block_number")
+    swap_files = parquet_files(settings.data_dir, chain, DEX_SWAPS)
+    needed = distinct_values(transfer_files, "block_number") | distinct_values(
+        swap_files, "block_number"
+    )
     have = distinct_values(parquet_files(settings.data_dir, chain, BLOCKS), "block_number")
     missing = sorted(needed - have)
     for batch_start in range(0, len(missing), METADATA_BATCH_SIZE):
@@ -151,9 +165,13 @@ def decode_token_metadata(settings: RunSettings) -> MetadataResult:
     records a failed call as NULL without raising, which would silently empty the
     token dimension.
     """
+    from chainstar.swaps import pool_tokens  # see extract_dataset
+
     chain = settings.chain.name
     transfer_files = parquet_files(settings.data_dir, chain, ERC20_TRANSFERS)
-    seen = distinct_values(transfer_files, "erc20")
+    # Pool tokens too: a swap's amounts need both tokens' decimals, and a wallet's
+    # pricing pools trade tokens the wallet never moved.
+    seen = distinct_values(transfer_files, "erc20") | pool_tokens(settings.data_dir, chain)
     known = distinct_values(parquet_files(settings.data_dir, chain, ERC20_METADATA), "erc20")
     missing = sorted(seen - known)
     for batch_start in range(0, len(missing), METADATA_BATCH_SIZE):

@@ -32,11 +32,11 @@ from chainstar.config import BlockRange
 from chainstar.datasets import (
     ALL_DATASETS,
     BLOCK_TIME_COLUMN,
-    ERC20_METADATA,
     Dataset,
     blocks_dataset,
     coverage_dataset,
     datasets_for,
+    metadata_datasets_for,
     parquet_files,
     ranged_datasets_for,
 )
@@ -305,9 +305,9 @@ def load_range(
     """Replace the chain's raw rows in `blocks` with what its chunk files hold there.
 
     Runs inside the caller's transaction, so the caller can record its progress in
-    the same commit. Only files that overlap the range are read. Token metadata
-    is not tied to blocks and is small, so it is replaced in full. Returns the
-    rows now in the range per dataset (metadata: all of the chain's).
+    the same commit. Only files that overlap the range are read. Token and pool
+    metadata are not tied to blocks and are small, so they are replaced in full.
+    Returns the rows now in the range per dataset (metadata: all of the chain's).
     """
     column, value = _identity(chain)
     quote = warehouse.quote
@@ -331,17 +331,17 @@ def load_range(
                 f"{_select_distinct(dataset)} WHERE {local_block} >= ? AND {local_block} < ?",
                 [[str(f) for f in files], blocks.start, blocks.end],
             )
-    if chain.family == EVM:
-        table = warehouse.table(RAW_SCHEMA, ERC20_METADATA.name)
-        files = parquet_files(data_dir, chain.name, ERC20_METADATA)
+    for dataset in metadata_datasets_for(chain):
+        table = warehouse.table(RAW_SCHEMA, dataset.name)
+        files = parquet_files(data_dir, chain.name, dataset)
         warehouse.delete(table, f"{quote(column)} = ?", [value])
-        counts[ERC20_METADATA.name] = 0
+        counts[dataset.name] = 0
         if files:
-            _check_identity(warehouse.local, ERC20_METADATA, files, chain)
-            counts[ERC20_METADATA.name] = warehouse.insert_select(
+            _check_identity(warehouse.local, dataset, files, chain)
+            counts[dataset.name] = warehouse.insert_select(
                 RAW_SCHEMA,
-                ERC20_METADATA.name,
-                _select_distinct(ERC20_METADATA),
+                dataset.name,
+                _select_distinct(dataset),
                 [[str(f) for f in files]],
             )
     return counts
@@ -350,7 +350,7 @@ def load_range(
 def delete_from_block(warehouse: Warehouse, chain: Chain, first_block: int) -> int:
     """Delete the chain's raw rows at and above `first_block`; return how many.
 
-    Token metadata stays: it belongs to no block and still describes the tokens.
+    Token and pool metadata stay: they belong to no block and still describe them.
     """
     column, value = _identity(chain)
     deleted = 0

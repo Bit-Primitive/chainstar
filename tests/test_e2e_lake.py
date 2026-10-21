@@ -82,7 +82,9 @@ def _sync_and_check(target: LakeTarget, tmp_path: Path) -> None:
     # Nothing changed since the sync published, so nothing is written again.
     again = publish(target)
     assert (again.written, again.emptied) == (0, 0)
-    assert again.unchanged == 21  # 2 days of Bitcoin facts, 1 of the others, x2, + dims
+    # 2 days of Bitcoin facts, 1 of the others, x2, + dims (21); swaps of the three
+    # chains with DEXes (3), prices of all four, Bitcoin's on 2 days (5), pools (2).
+    assert again.unchanged == 21 + 3 + 5 + 2
 
 
 def test_local_lake_sync_publishes_the_star_schema(tmp_path: Path):
