@@ -1,39 +1,63 @@
-"""Command-line interface: `chainstar doctor`, `chainstar init`, `chainstar run`."""
+"""Command-line interface: quickstart, run, export, wallet, doctor and init."""
 
 import os
+import sys
+import traceback
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated
 
+import click
 import duckdb
 import typer
 
 from chainstar import __version__
-from chainstar.chains import EVM, SUPPORTED_CHAINS, UnknownChainError, get_chain
+from chainstar.chains import EVM, SUPPORTED_CHAINS, Chain, UnknownChainError, get_chain
 from chainstar.chunks import ExtractError
 from chainstar.config import (
     CONFIG_FILENAME,
     CONFIG_TEMPLATE,
+    DEFAULT_DATA_DIR,
+    DEFAULT_RPC_ENV,
     DEFAULT_TARGET,
     TARGET_ENV,
+    BlockRange,
     ConfigError,
     load_config_file,
-    resolve_rpc_url,
+    resolve_rpc,
     resolve_settings,
+    rpc_env_name,
 )
 from chainstar.cryo import INSTALL_HINT, CryoError, cryo_version, find_cryo
+from chainstar.errors import bug_report_hint, describe, hint_for
+from chainstar.export import (
+    FORMATS,
+    TABLES,
+    TRANSFERS_VIEW,
+    ExportError,
+    ExportRequest,
+    export,
+    normalize_address,
+)
+from chainstar.export import resolve_format as resolve_export_format
 from chainstar.load import LoadError, attach
 from chainstar.model import ModelError
 from chainstar.pipeline import PipelineError, run_pipeline
-from chainstar.redact import redact_url
+from chainstar.quickstart import DEFAULT_RECENT, cryo_missing_message, next_steps, recent_range
+from chainstar.redact import redact_text, redact_url
 from chainstar.rpc import RpcError, identify_node
 from chainstar.targets import TARGET_HELP, DuckDBTarget, TargetError, parse_target
 
 app = typer.Typer(
-    help="Raw blockchain data to clean dimensional tables in your own warehouse, from one command.",
+    help="Raw blockchain data to clean dimensional tables in your own warehouse, from one command."
+    "\n\nNew here? Run `chainstar quickstart`.",
     add_completion=False,
     no_args_is_help=True,
     pretty_exceptions_enable=False,
+    # Markdown keeps the example blocks in each command's help as written.
+    rich_markup_mode="markdown",
 )
 
 ConfigOption = Annotated[Path, typer.Option("--config", help="Path to chainstar.yml (optional).")]
@@ -43,18 +67,38 @@ ChainOption = Annotated[
 RpcOption = Annotated[
     str | None,
     typer.Option(
-        "--rpc-url", help="JSON-RPC URL. Defaults to the CHAINSTAR_RPC_URL environment variable."
+        "--rpc-url",
+        help="JSON-RPC URL. Defaults to the CHAINSTAR_RPC_URL environment variable, then to a "
+        "free shared public endpoint for the chain.",
     ),
 ]
 TargetOption = Annotated[
     str | None,
     typer.Option(help=f"{TARGET_HELP}. Defaults to {TARGET_ENV}, then chainstar.yml."),
 ]
+RateOption = Annotated[
+    int | None,
+    typer.Option(
+        help="Cap on RPC requests per second. Default: none for your own RPC, a gentle "
+        "per-chain rate for the public endpoints."
+    ),
+]
+ChunkOption = Annotated[
+    int | None,
+    typer.Option(
+        help="Blocks (Solana: slots) per Parquet file. Default 100 (10 on public endpoints); "
+        "lower it for flaky RPCs."
+    ),
+]
+DataDirOption = Annotated[
+    Path | None, typer.Option(help="Where Parquet files are kept. Default ./data.")
+]
 
-# Errors we expect users to hit (bad input, unreachable services). They get a one-line
-# message instead of a traceback.
+# Errors we expect users to hit (bad input, unreachable services, files). They get
+# one line and a hint instead of a traceback; --debug shows the traceback too.
 USER_ERRORS = (
     duckdb.Error,
+    OSError,
     ConfigError,
     UnknownChainError,
     TargetError,
@@ -64,7 +108,10 @@ USER_ERRORS = (
     LoadError,
     ModelError,
     PipelineError,
+    ExportError,
 )
+
+_state = {"debug": False}
 
 
 def _version_callback(value: bool) -> None:
@@ -79,11 +126,44 @@ def main(
         bool,
         typer.Option("--version", callback=_version_callback, is_eager=True, help="Show version."),
     ] = False,
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Show the full traceback when something fails.")
+    ] = False,
 ) -> None:
-    pass
+    _state["debug"] = debug
 
 
-@app.command()
+@contextmanager
+def _friendly_errors(secrets: list[str | None]) -> Iterator[None]:
+    """Turn failures into `error:` and `hint:` lines, with RPC URLs redacted."""
+    known = [secret for secret in secrets if secret]
+    try:
+        yield
+    except (typer.Exit, click.exceptions.Abort, click.exceptions.ClickException):
+        raise
+    except KeyboardInterrupt:
+        typer.echo(
+            "\nstopped. Finished chunks are kept; run the same command again to continue.",
+            err=True,
+        )
+        raise typer.Exit(130) from None
+    except Exception as error:
+        if _state["debug"]:
+            typer.echo(redact_text(traceback.format_exc(), known), err=True)
+        typer.echo(f"\nerror: {redact_text(describe(error), known)}", err=True)
+        hint = hint_for(error) if isinstance(error, USER_ERRORS) else bug_report_hint()
+        if hint:
+            typer.echo(f"hint:  {hint}", err=True)
+        raise typer.Exit(1) from None
+
+
+def _secrets(rpc_url: str | None) -> list[str | None]:
+    return [rpc_url, os.environ.get(DEFAULT_RPC_ENV)]
+
+
+@app.command(
+    epilog="**Examples**\n\n```\nchainstar init\nchainstar init my-project.yml --force\n```"
+)
 def init(
     path: Annotated[Path, typer.Argument(help="Where to write the file.")] = Path(CONFIG_FILENAME),
     force: Annotated[bool, typer.Option(help="Overwrite an existing file.")] = False,
@@ -92,12 +172,21 @@ def init(
     if path.exists() and not force:
         typer.echo(f"{path} already exists; use --force to overwrite it.", err=True)
         raise typer.Exit(1)
-    path.write_text(CONFIG_TEMPLATE)
+    with _friendly_errors([]):
+        path.write_text(CONFIG_TEMPLATE)
     typer.echo(f"wrote {path}")
-    typer.echo("next: set CHAINSTAR_RPC_URL, choose a block range, then run `chainstar doctor`.")
+    typer.echo(
+        "next: choose a block range, optionally set CHAINSTAR_RPC_URL to your own RPC, "
+        "then run `chainstar doctor`."
+    )
 
 
-@app.command()
+@app.command(
+    epilog="**Examples**\n\n```\n"
+    "chainstar doctor --chain base\n"
+    'chainstar doctor --chain ethereum --rpc-url "$MY_RPC"\n'
+    "chainstar doctor --target postgres:postgresql://me@localhost:5432/chain\n```"
+)
 def doctor(
     config: ConfigOption = Path(CONFIG_FILENAME),
     chain: ChainOption = None,
@@ -134,16 +223,19 @@ def doctor(
     else:
         report(False, "cryo", f"not found on PATH; {INSTALL_HINT}")
 
+    # Without --chain, assume an EVM endpoint, as chainstar always has.
+    rpc_chain = expected_chain or SUPPORTED_CHAINS["ethereum"]
+    rpc = resolve_rpc(rpc_url, file_config, rpc_chain)
     try:
-        url = resolve_rpc_url(rpc_url, file_config)
-        # Without --chain, assume an EVM endpoint, as chainstar always has.
-        node = identify_node(expected_chain or SUPPORTED_CHAINS["ethereum"], url)
-        detail = f"{redact_url(url)} {node.detail}"
+        node = identify_node(rpc_chain, rpc.url)
+        detail = f"{redact_url(rpc.url)} {node.detail}"
+        if rpc.public:
+            detail += " (free shared public endpoint)"
         if expected_chain and not node.matches:
             report(False, "rpc", f"{detail}; expected {node.expected}")
         else:
             report(True, "rpc", detail)
-    except (ConfigError, RpcError) as error:
+    except RpcError as error:
         report(False, "rpc", str(error))
 
     spec = target or os.environ.get(TARGET_ENV) or file_config.get("target", DEFAULT_TARGET)
@@ -159,7 +251,8 @@ def doctor(
     except TargetError as error:
         report(False, "target", str(error))
     except Exception as error:  # any driver error means "not reachable"; show why
-        report(False, "target", f"{type(error).__name__}: {error}")
+        hint = hint_for(error)
+        report(False, "target", f"{type(error).__name__}: {error}" + (f" ({hint})" if hint else ""))
 
     dbt_detail = _dbt_versions()
     report("missing" not in dbt_detail, "dbt", dbt_detail)
@@ -169,7 +262,15 @@ def doctor(
     typer.echo("\nall checks passed.")
 
 
-@app.command()
+@app.command(
+    epilog="**Examples**\n\n```\n"
+    "chainstar run --chain base --blocks 52900000:52900020\n"
+    'chainstar run --chain ethereum --blocks 20000000:20000100 --rpc-url "$MY_RPC"\n'
+    "chainstar run --chain solana --blocks 459564290:459564310   # slots\n"
+    "chainstar run --chain bitcoin --blocks 972460:972461 "
+    "--target postgres:postgresql://me@localhost:5432/chain\n```\n\n"
+    "Each run loads every chunk already saved for the chain, so ranges add up."
+)
 def run(
     config: ConfigOption = Path(CONFIG_FILENAME),
     chain: ChainOption = None,
@@ -179,23 +280,15 @@ def run(
     ] = None,
     rpc_url: RpcOption = None,
     target: TargetOption = None,
-    data_dir: Annotated[
-        Path | None, typer.Option(help="Where Parquet files are kept. Default ./data.")
-    ] = None,
-    requests_per_second: Annotated[
-        int | None, typer.Option(help="Cap on RPC requests per second sent to your RPC.")
-    ] = None,
-    chunk_size: Annotated[
-        int | None,
-        typer.Option(
-            help="Blocks (Solana: slots) per Parquet file. Default 100; lower it for flaky RPCs."
-        ),
-    ] = None,
+    data_dir: DataDirOption = None,
+    requests_per_second: RateOption = None,
+    chunk_size: ChunkOption = None,
 ) -> None:
     """Extract, decode, load and model a block range into star-schema tables."""
-    try:
+    with _friendly_errors(_secrets(rpc_url)):
+        file_config = load_config_file(config)
         settings = resolve_settings(
-            file_config=load_config_file(config),
+            file_config=file_config,
             chain=chain,
             blocks=blocks,
             rpc_url=rpc_url,
@@ -204,10 +297,219 @@ def run(
             requests_per_second=requests_per_second,
             chunk_size=chunk_size,
         )
+        run_pipeline(settings, typer.echo, rpc_env_name(file_config))
+
+
+@app.command(
+    epilog="**Examples**\n\n```\n"
+    "chainstar quickstart                                  # asks a few questions\n"
+    "chainstar quickstart --chain base --yes               # no questions, for scripts\n"
+    "chainstar quickstart --chain solana --recent 50 --yes\n"
+    'docker run --rm -v "$PWD:/work" ghcr.io/bit-primitive/chainstar quickstart --yes\n```'
+)
+def quickstart(
+    chain: Annotated[
+        str | None,
+        typer.Option(help=f"Chain to read: {', '.join(SUPPORTED_CHAINS)}. Default base."),
+    ] = None,
+    recent: Annotated[
+        int | None,
+        typer.Option(
+            help="How many of the latest blocks (Solana: slots) to fetch. "
+            "Default 20, or 1 on Bitcoin."
+        ),
+    ] = None,
+    rpc_url: RpcOption = None,
+    target: Annotated[
+        str, typer.Option(help=f"{TARGET_HELP}. Default: a DuckDB file in this folder.")
+    ] = DEFAULT_TARGET,
+    data_dir: Annotated[Path, typer.Option(help="Where Parquet files are kept.")] = Path(
+        DEFAULT_DATA_DIR
+    ),
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Ask nothing; use the options and defaults.")
+    ] = False,
+) -> None:
+    """A guided first run: fetch a few of the latest blocks, build the tables, show what next.
+
+    Without --rpc-url or CHAINSTAR_RPC_URL it uses a free shared public endpoint, so
+    nothing needs setting up first.
+    """
+    # Ask only when someone is there to answer; scripts and `docker run` without
+    # -it have no terminal, and get the defaults as with --yes.
+    interactive = not yes and sys.stdin.isatty()
+    with _friendly_errors(_secrets(rpc_url)):
+        if interactive:
+            typer.echo("Welcome to chainstar. Two questions, then it fetches and builds.\n")
+            chain = typer.prompt(
+                f"Which chain? ({', '.join(SUPPORTED_CHAINS)})",
+                default=chain or "base",
+                type=click.Choice(list(SUPPORTED_CHAINS)),
+            )
+        selected = get_chain(chain or "base")
+        if selected.family == EVM and find_cryo() is None:
+            typer.echo(cryo_missing_message(selected), err=True)
+            raise typer.Exit(1)
+        count = recent or DEFAULT_RECENT[selected.name]
+        if interactive:
+            count = typer.prompt(f"How many of the latest {selected.block_noun}?", default=count)
+
+        blocks = _recent_blocks(selected, count, rpc_url)
+        settings = resolve_settings(
+            file_config={},
+            chain=selected.name,
+            blocks=str(blocks),
+            rpc_url=rpc_url,
+            target=target,
+            data_dir=data_dir,
+            requests_per_second=None,
+            chunk_size=None,
+        )
+        if interactive and not typer.confirm(
+            f"Fetch {selected.name} {selected.block_noun} {blocks.start:,} to {blocks.end - 1:,} "
+            f"into {settings.target.describe()}?",
+            default=True,
+        ):
+            raise typer.Exit(0)
+        typer.echo("")
         run_pipeline(settings, typer.echo)
-    except USER_ERRORS as error:
-        typer.echo(f"\nerror: {error}", err=True)
-        raise typer.Exit(1) from None
+        typer.echo("")
+        for line in next_steps(selected, settings.target, settings.data_dir):
+            typer.echo(line)
+
+
+def _recent_blocks(chain: Chain, count: int, rpc_url: str | None) -> BlockRange:
+    """The latest `count` blocks (Solana: slots), read from the chain head."""
+    rpc = resolve_rpc(rpc_url, {}, chain)
+    return recent_range(chain, identify_node(chain, rpc.url).head, count)
+
+
+@app.command(
+    name="export",
+    epilog="**Examples**\n\n```\n"
+    "chainstar export                                   # transfers.csv\n"
+    "chainstar export transfers --output transfers.xlsx\n"
+    "chainstar export transfers --chain base --wallet 0xYourAddress --output mine.xlsx\n"
+    "chainstar export transfers --token 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --limit 1000\n"
+    "chainstar export fct_fees --format parquet\n```\n\n"
+    f"Tables: {', '.join(TABLES)}. `transfers` is fct_transfers with each token's "
+    "symbol and name. amount_raw stays exact text; amount is a number. Excel sheets "
+    "hold at most 1,048,575 rows; larger exports are refused with a suggestion.",
+)
+def export_command(
+    table: Annotated[
+        str, typer.Argument(help=f"What to export: {', '.join(TABLES)}.")
+    ] = TRANSFERS_VIEW,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="File to write. Default <table>.<format> here."),
+    ] = None,
+    format_name: Annotated[
+        str | None,
+        typer.Option(
+            "--format", help=f"{', '.join(FORMATS)}. Default: from --output's extension, or csv."
+        ),
+    ] = None,
+    chain: Annotated[str | None, typer.Option(help="Only this chain's rows.")] = None,
+    wallet: Annotated[
+        str | None, typer.Option(help="Only rows where this address sends or receives.")
+    ] = None,
+    token: Annotated[
+        str | None,
+        typer.Option(help="Only this token: its contract address, SPL mint, or `native`."),
+    ] = None,
+    limit: Annotated[int | None, typer.Option(help="At most this many rows.")] = None,
+    target: TargetOption = None,
+    config: ConfigOption = Path(CONFIG_FILENAME),
+) -> None:
+    """Save a table as a CSV, Excel (.xlsx) or Parquet file, optionally filtered."""
+    with _friendly_errors([]):
+        file_config = load_config_file(config)
+        spec = target or os.environ.get(TARGET_ENV) or file_config.get("target", DEFAULT_TARGET)
+        path, chosen = resolve_export_format(output, format_name, table)
+        request = ExportRequest(table, path, chosen, chain, wallet, token, limit)
+        rows = export(parse_target(spec), request)
+        typer.echo(f"wrote {rows:,} rows to {path}")
+        if rows == 0:
+            typer.echo("(no rows matched; check the filters, or load more blocks first)")
+
+
+@app.command(
+    epilog="**Examples**\n\n```\n"
+    "chainstar wallet 0xYourAddress --chain base --recent 1000\n"
+    "chainstar wallet 0xYourAddress --chain ethereum --blocks 20000000:20001000 "
+    '--rpc-url "$MY_RPC" --blocks-per-request 500\n'
+    "chainstar wallet YourSolanaAddress --chain solana --recent 50 --output mine.csv\n```\n\n"
+    "On Ethereum and Base the RPC node filters the transfers, so only this address's "
+    "are downloaded: two requests per --blocks-per-request blocks, plus one per block "
+    "that has a transfer. Bitcoin and Solana nodes cannot filter by address, so every "
+    "block in the range is read. Each wallet gets its own folder under ./data, so it "
+    "never mixes with your main warehouse."
+)
+def wallet(
+    address: Annotated[str, typer.Argument(help="The address whose transfers you want.")],
+    chain: Annotated[
+        str, typer.Option(help=f"Chain to read: {', '.join(SUPPORTED_CHAINS)}.")
+    ] = "ethereum",
+    blocks: Annotated[
+        str | None,
+        typer.Option(help="Block range START:END, END exclusive. Slots on Solana."),
+    ] = None,
+    recent: Annotated[
+        int | None,
+        typer.Option(help="Instead of --blocks: this many of the latest blocks (Solana: slots)."),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "--output", "-o", help="Spreadsheet to write. Default <chain>-<address>.xlsx here."
+        ),
+    ] = None,
+    rpc_url: RpcOption = None,
+    blocks_per_request: Annotated[
+        int,
+        typer.Option(
+            help="EVM only: blocks per filtered log request. Keep 1 on public endpoints; "
+            "many paid providers accept hundreds or more."
+        ),
+    ] = 1,
+    requests_per_second: RateOption = None,
+    chunk_size: ChunkOption = None,
+) -> None:
+    """All token transfers sent or received by one address in a range, as a spreadsheet."""
+    with _friendly_errors(_secrets(rpc_url)):
+        selected = get_chain(chain)
+        if (blocks is None) == (recent is None):
+            raise ConfigError("give either --blocks START:END or --recent N")
+        if selected.family == EVM and find_cryo() is None:
+            typer.echo(cryo_missing_message(selected), err=True)
+            raise typer.Exit(1)
+        if recent is not None:
+            blocks = str(_recent_blocks(selected, recent, rpc_url))
+        normalized = normalize_address(address)
+        folder = Path(DEFAULT_DATA_DIR) / f"wallet-{selected.name}-{normalized}"
+        settings = resolve_settings(
+            file_config={},
+            chain=selected.name,
+            blocks=blocks,
+            rpc_url=rpc_url,
+            target=f"duckdb:{folder / 'warehouse.duckdb'}",
+            data_dir=folder,
+            requests_per_second=requests_per_second,
+            chunk_size=chunk_size,
+            wallet=normalized,
+            blocks_per_request=blocks_per_request,
+        )
+        run_pipeline(settings, typer.echo)
+        path, chosen = resolve_export_format(
+            output or Path(f"{selected.name}-{normalized}.xlsx"), None, TRANSFERS_VIEW
+        )
+        rows = export(
+            settings.target,
+            ExportRequest(TRANSFERS_VIEW, path, chosen, chain=selected.name, wallet=normalized),
+        )
+        typer.echo("")
+        typer.echo(f"wrote {rows:,} transfers of {normalized} to {path}")
 
 
 def _dbt_versions() -> str:

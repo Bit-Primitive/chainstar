@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from chainstar.chains import Chain, get_chain
+from chainstar.public_rpc import public_endpoint
 from chainstar.targets import Target, parse_target
 
 CONFIG_FILENAME = "chainstar.yml"
@@ -71,6 +72,19 @@ class RunSettings:
     data_dir: Path
     requests_per_second: int | None
     chunk_size: int
+    # True when no RPC URL was configured and the chain's free public endpoint is used.
+    rpc_is_public: bool = False
+    # Set by `chainstar wallet`: on EVM chains, extract only this address's transfers.
+    wallet: str | None = None
+    # Blocks per eth_getLogs request when extracting one wallet's transfers.
+    blocks_per_request: int = 1
+
+
+@dataclass(frozen=True)
+class RpcChoice:
+    url: str
+    # True when nothing was configured and chainstar fell back to a public endpoint.
+    public: bool
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -89,12 +103,16 @@ def load_config_file(path: Path) -> dict[str, Any]:
     return data
 
 
-def resolve_rpc_url(flag: str | None, file_config: dict[str, Any]) -> str:
-    env_name = file_config.get("rpc_url_env", DEFAULT_RPC_ENV)
-    rpc_url = flag or os.environ.get(env_name, "")
-    if not rpc_url:
-        raise ConfigError(f"no RPC URL: pass --rpc-url or set the {env_name} environment variable")
-    return rpc_url
+def rpc_env_name(file_config: dict[str, Any]) -> str:
+    return file_config.get("rpc_url_env", DEFAULT_RPC_ENV)
+
+
+def resolve_rpc(flag: str | None, file_config: dict[str, Any], chain: Chain) -> RpcChoice:
+    """The --rpc-url flag, then the environment variable, then the chain's public endpoint."""
+    rpc_url = flag or os.environ.get(rpc_env_name(file_config), "")
+    if rpc_url:
+        return RpcChoice(rpc_url, public=False)
+    return RpcChoice(public_endpoint(chain).url, public=True)
 
 
 def resolve_settings(
@@ -107,6 +125,8 @@ def resolve_settings(
     data_dir: Path | None,
     requests_per_second: int | None,
     chunk_size: int | None,
+    wallet: str | None = None,
+    blocks_per_request: int = 1,
 ) -> RunSettings:
     chain_name = chain or file_config.get("chain")
     if not chain_name:
@@ -117,18 +137,31 @@ def resolve_settings(
             "no block range: pass --blocks START:END or set `blocks` in chainstar.yml"
         )
     target_spec = target or os.environ.get(TARGET_ENV) or file_config.get("target", DEFAULT_TARGET)
+    resolved_chain = get_chain(chain_name)
+    rpc = resolve_rpc(rpc_url, file_config, resolved_chain)
     rps = requests_per_second or file_config.get("requests_per_second")
-    chunk = int(chunk_size or file_config.get("chunk_size", DEFAULT_CHUNK_SIZE))
+    chunk = chunk_size or file_config.get("chunk_size")
+    if rpc.public:
+        # A shared endpoint gets the gentle defaults unless the user chose otherwise.
+        endpoint = public_endpoint(resolved_chain)
+        rps = rps or endpoint.requests_per_second
+        chunk = chunk or endpoint.chunk_size
+    chunk = int(chunk or DEFAULT_CHUNK_SIZE)
     if chunk < 1:
         raise ConfigError(f"chunk_size must be at least 1, got {chunk}")
+    if blocks_per_request < 1:
+        raise ConfigError(f"blocks per request must be at least 1, got {blocks_per_request}")
     return RunSettings(
-        chain=get_chain(chain_name),
+        chain=resolved_chain,
         blocks=parse_block_range(block_text),
-        rpc_url=resolve_rpc_url(rpc_url, file_config),
+        rpc_url=rpc.url,
         target=parse_target(target_spec),
         data_dir=Path(data_dir or file_config.get("data_dir", DEFAULT_DATA_DIR)).expanduser(),
         requests_per_second=int(rps) if rps else None,
         chunk_size=chunk,
+        rpc_is_public=rpc.public,
+        wallet=wallet,
+        blocks_per_request=blocks_per_request,
     )
 
 
@@ -156,6 +189,8 @@ data_dir: ./data
 
 # The RPC URL is never stored in this file, because hosted RPC URLs usually
 # contain an API key. chainstar reads it from the environment variable named here.
+# If it is not set, chainstar uses a free shared public endpoint for the chain,
+# which is rate limited: fine for trying chainstar, slow for large ranges.
 rpc_url_env: CHAINSTAR_RPC_URL
 
 # Optional: cap requests per second sent to your RPC provider.

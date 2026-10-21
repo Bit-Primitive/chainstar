@@ -2,6 +2,8 @@
 
 extract: blocks, transactions and ERC-20 Transfer events for the block range.
          cryo decodes each Transfer log into token, from, to and value as it goes.
+         For one wallet (`chainstar wallet`), only the Transfer events it sent or
+         received, and only the blocks those happened in.
 decode:  for every token contract seen, cryo calls name(), symbol() and decimals().
 """
 
@@ -15,6 +17,7 @@ import duckdb
 from chainstar.config import RunSettings
 from chainstar.cryo import run_cryo
 from chainstar.datasets import (
+    BLOCKS,
     ERC20_METADATA,
     ERC20_TRANSFERS,
     Dataset,
@@ -51,6 +54,87 @@ def extract_dataset(settings: RunSettings, dataset: Dataset) -> int:
         settings.blocks.start,
         settings.blocks.end,
     )
+
+
+# cryo 0.3.2 turns --from-address into the Transfer filter's topic1 and --to-address
+# into topic2. Topics are AND-ed in eth_getLogs, so passing both would match only
+# transfers to oneself; "sent or received" takes one run per direction. The label
+# keeps the two runs' files apart and lets re-runs skip what is already on disk.
+WALLET_DIRECTIONS = (("from", "--from-address"), ("to", "--to-address"))
+
+
+def extract_wallet_transfers(settings: RunSettings, wallet: str) -> int:
+    """Extract only the ERC-20 transfers `wallet` sent or received; return their count.
+
+    The node does the filtering, so only matching events are downloaded. With
+    blocks_per_request above 1, one eth_getLogs request covers several blocks;
+    many endpoints refuse that for filters without a contract address (the free
+    publicnode endpoints accept one block per request).
+    """
+    for label, flag in WALLET_DIRECTIONS:
+        run_cryo(
+            ERC20_TRANSFERS.name,
+            rpc_url=settings.rpc_url,
+            output_dir=dataset_dir(settings.data_dir, settings.chain.name, ERC20_TRANSFERS),
+            args=[
+                "--blocks",
+                str(settings.blocks),
+                "--chunk-size",
+                str(settings.chunk_size),
+                "--inner-request-size",
+                str(settings.blocks_per_request),
+                flag,
+                wallet,
+                "--label",
+                label,
+                "--columns",
+                *ERC20_TRANSFERS.cryo_columns,
+            ],
+            requests_per_second=settings.requests_per_second,
+        )
+    files = parquet_files(settings.data_dir, settings.chain.name, ERC20_TRANSFERS)
+    if not files:
+        return 0
+    # A transfer to oneself is in both directions' files; count it once.
+    with duckdb.connect() as connection:
+        row = connection.execute(
+            "SELECT count(*) FROM (SELECT DISTINCT transaction_hash, log_index "
+            "FROM read_parquet(?) WHERE block_number >= ? AND block_number < ?)",
+            [[str(f) for f in files], settings.blocks.start, settings.blocks.end],
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def extract_blocks_with_transfers(settings: RunSettings) -> int:
+    """Fetch the blocks that contain a saved transfer and are not on disk yet.
+
+    The star schema needs each transfer's block for its timestamp; in wallet mode
+    that is usually a small fraction of the range. Returns the number fetched.
+    """
+    chain = settings.chain.name
+    transfer_files = parquet_files(settings.data_dir, chain, ERC20_TRANSFERS)
+    needed = distinct_values(transfer_files, "block_number")
+    have = distinct_values(parquet_files(settings.data_dir, chain, BLOCKS), "block_number")
+    missing = sorted(needed - have)
+    for batch_start in range(0, len(missing), METADATA_BATCH_SIZE):
+        batch = [str(number) for number in missing[batch_start : batch_start + METADATA_BATCH_SIZE]]
+        run_cryo(
+            BLOCKS.name,
+            rpc_url=settings.rpc_url,
+            output_dir=dataset_dir(settings.data_dir, chain, BLOCKS),
+            # Separate values are separate blocks to cryo, not a range. It names
+            # the file after the lowest and highest, so the label tells batches apart.
+            args=[
+                "--blocks",
+                *batch,
+                "--columns",
+                *BLOCKS.cryo_columns,
+                "--label",
+                _batch_label(batch),
+            ],
+            requests_per_second=settings.requests_per_second,
+        )
+    return len(missing)
 
 
 @dataclass(frozen=True)
@@ -104,7 +188,7 @@ def count_rows_in_range(
     return int(row[0]) if row else 0
 
 
-def distinct_values(files: Sequence[Path], column: str) -> set[str]:
+def distinct_values(files: Sequence[Path], column: str) -> set:
     if not files:
         return set()
     with duckdb.connect() as connection:

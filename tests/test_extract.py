@@ -76,3 +76,31 @@ def test_extract_passes_range_and_chunk_size_to_cryo(data_dir: Path, recorded_cr
     assert args[args.index("--blocks") + 1] == "26239738:26239740"
     assert args[args.index("--chunk-size") + 1] == "10"
     assert rows == 2
+
+
+def test_wallet_transfers_use_one_filtered_run_per_direction(data_dir: Path, recorded_cryo_calls):
+    settings = replace(_settings(data_dir), wallet="0xabc", blocks_per_request=50)
+    rows = extract.extract_wallet_transfers(settings, "0xabc")
+    flags = []
+    for call in recorded_cryo_calls:
+        args = call["args"]
+        assert args[args.index("--inner-request-size") + 1] == "50"
+        label = args[args.index("--label") + 1]
+        flag = "--from-address" if "--from-address" in args else "--to-address"
+        assert args[args.index(flag) + 1] == "0xabc"
+        flags.append((label, flag))
+    # topic1 and topic2 are AND-ed by eth_getLogs, so never both in one run.
+    assert flags == [("from", "--from-address"), ("to", "--to-address")]
+    assert rows == 562  # the fixture files stand in for what cryo wrote
+
+
+def test_wallet_blocks_are_fetched_only_where_transfers_are(data_dir: Path, recorded_cryo_calls):
+    assert extract.extract_blocks_with_transfers(_settings(data_dir)) == 0
+    assert recorded_cryo_calls == []
+
+    for file in parquet_files(data_dir, "ethereum", BLOCKS):
+        file.unlink()
+    assert extract.extract_blocks_with_transfers(_settings(data_dir)) == 2
+    args = recorded_cryo_calls[0]["args"]
+    assert args[args.index("--blocks") + 1 : args.index("--columns")] == ["26239738", "26239739"]
+    assert "--label" in args

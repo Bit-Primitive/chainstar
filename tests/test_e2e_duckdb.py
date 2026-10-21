@@ -100,3 +100,15 @@ def test_relative_work_dir_stays_out_of_the_package(data_dir: Path, tmp_path: Pa
     assert build_models(target, Path("data/.dbt")).failures == []
     assert (tmp_path / "data" / ".dbt" / "target" / "manifest.json").exists()
     assert not (DBT_PROJECT_DIR / "data").exists()
+
+
+def test_wallet_shaped_data_builds(data_dir: Path, tmp_path: Path):
+    # `chainstar wallet` on an EVM chain saves transfers and their blocks, but no
+    # transactions; the star schema must still build and pass its tests.
+    for path in (data_dir / "base" / "transactions").glob("*.parquet"):
+        path.unlink()
+    target = DuckDBTarget(tmp_path / "warehouse.duckdb")
+    load_raw(target, data_dir, get_chain("base"))
+    assert build_models(target, tmp_path / "dbt").failures == []
+    assert fetch(target, "SELECT count(*) FROM {schema}.fct_transfers") == [(62,)]
+    assert fetch(target, "SELECT count(*) FROM {schema}.fct_fees") == [(0,)]

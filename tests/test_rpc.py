@@ -147,3 +147,11 @@ def test_identify_evm(server):
     node = identify_node(get_chain("base"), SECRET_URL)
     assert node.matches
     assert node.detail == "chain id 8453, latest block 16"
+
+
+def test_http_status_is_reported_and_rate_limits_named(server):
+    server["replies"].append(urllib.error.HTTPError(SECRET_URL, 429, "Too Many Requests", {}, None))
+    with pytest.raises(RpcError) as raised:
+        RpcClient(SECRET_URL, attempts=1).call("getBlock")
+    assert "answered HTTP 429 (too many requests: rate limited)" in str(raised.value)
+    assert "supersecretkey" not in str(raised.value)

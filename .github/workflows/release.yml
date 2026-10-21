@@ -1,0 +1,49 @@
+name: Release to PyPI
+
+# Publishes chainstar to PyPI when a version tag such as v0.1.0 is pushed.
+# Uses PyPI trusted publishing: no API token is stored in GitHub. The one-time
+# setup on PyPI is described in the README ("Releasing").
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: Check the tag matches the version in pyproject.toml
+        run: |
+          version=$(uv version --short)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
+            exit 1
+          fi
+      - run: uv build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-dists
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    # Building happens in the job above, so build tools never run with the
+    # permission to publish.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/chainstar
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-dists
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

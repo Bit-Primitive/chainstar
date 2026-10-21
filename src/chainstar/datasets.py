@@ -256,6 +256,16 @@ def datasets_for(chain: Chain) -> tuple[Dataset, ...]:
     return tuple(dataset for dataset in ALL_DATASETS if dataset.family == chain.family)
 
 
+def coverage_dataset(chain: Chain) -> Dataset:
+    """The dataset whose chunk files show which blocks (Solana: slots) were fetched.
+
+    ERC-20 transfers on EVM chains, because they are extracted for the whole range
+    in every mode, while `chainstar wallet` fetches blocks only where transfers are.
+    Blocks on Bitcoin and Solana, whose chunks are written even when empty.
+    """
+    return {EVM: ERC20_TRANSFERS, BITCOIN: BITCOIN_BLOCKS, SOLANA: SOLANA_BLOCKS}[chain.family]
+
+
 def dataset_dir(data_dir: Path, chain: str, dataset: Dataset) -> Path:
     return data_dir / chain / dataset.name
 

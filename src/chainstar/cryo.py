@@ -14,7 +14,10 @@ from pathlib import Path
 
 from chainstar.redact import redact_text
 
-INSTALL_HINT = "install it with `cargo install cryo_cli` (needs Rust: https://rustup.rs)"
+INSTALL_HINT = (
+    "install it with `cargo install cryo_cli` (needs Rust: https://rustup.rs), "
+    "or use the Docker image ghcr.io/bit-primitive/chainstar, which includes it"
+)
 ATTEMPTS = 3
 RETRY_DELAY_SECONDS = 3.0
 

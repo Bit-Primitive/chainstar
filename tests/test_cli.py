@@ -2,9 +2,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from chainstar import __version__, cli
+from chainstar import __version__, cli, pipeline
 from chainstar.cli import app
-from chainstar.rpc import NodeIdentity
+from chainstar.rpc import NodeIdentity, RpcError
 
 runner = CliRunner()
 
@@ -25,14 +25,24 @@ def test_init_writes_config_and_refuses_to_overwrite(tmp_path: Path):
     assert runner.invoke(app, ["init", str(path), "--force"]).exit_code == 0
 
 
-def test_run_without_rpc_fails_cleanly(tmp_path: Path, monkeypatch):
+def test_run_without_rpc_uses_the_public_endpoint_and_fails_cleanly(tmp_path: Path, monkeypatch):
     monkeypatch.delenv("CHAINSTAR_RPC_URL", raising=False)
+    urls = []
+
+    def unreachable(chain, url):
+        urls.append(url)
+        raise RpcError("eth_chainId: could not reach https://base-rpc.publicnode.com (URLError)")
+
+    monkeypatch.setattr(pipeline, "identify_node", unreachable)
     result = runner.invoke(
         app,
         ["run", "--config", str(tmp_path / "none.yml"), "--chain", "base", "--blocks", "1:2"],
     )
     assert result.exit_code == 1
+    assert urls == ["https://base-rpc.publicnode.com"]
+    assert "free shared public endpoint" in result.output
     assert "CHAINSTAR_RPC_URL" in result.output
+    assert "hint:  check your internet connection" in result.output
     assert "Traceback" not in result.output
 
 

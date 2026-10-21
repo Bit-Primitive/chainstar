@@ -70,10 +70,22 @@ def test_custom_rpc_env_name(monkeypatch):
     assert settings.rpc_url == "https://mine.example"
 
 
-def test_missing_rpc_names_the_env_var(monkeypatch):
+def test_without_rpc_the_public_endpoint_is_used_gently(monkeypatch):
     monkeypatch.delenv("CHAINSTAR_RPC_URL", raising=False)
-    with pytest.raises(ConfigError, match="CHAINSTAR_RPC_URL"):
-        _resolve(chain="base", blocks="1:2")
+    settings = _resolve(chain="base", blocks="1:2")
+    assert settings.rpc_url == "https://base-rpc.publicnode.com"
+    assert settings.rpc_is_public
+    assert (settings.requests_per_second, settings.chunk_size) == (5, 10)
+    # The user's own choices still win over the gentle defaults.
+    chosen = _resolve(chain="base", blocks="1:2", requests_per_second=2, chunk_size=50)
+    assert (chosen.requests_per_second, chosen.chunk_size) == (2, 50)
+
+
+def test_own_rpc_gets_no_public_limits(monkeypatch):
+    monkeypatch.setenv("CHAINSTAR_RPC_URL", "https://mine.example")
+    settings = _resolve(chain="base", blocks="1:2")
+    assert not settings.rpc_is_public
+    assert (settings.requests_per_second, settings.chunk_size) == (None, 100)
 
 
 def test_config_file_refuses_rpc_url(tmp_path):

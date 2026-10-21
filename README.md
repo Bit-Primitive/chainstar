@@ -2,10 +2,86 @@
 
 Raw blockchain data to clean dimensional tables in your own warehouse, from one command.
 
-chainstar pulls blocks, transactions and token transfers from an RPC endpoint you
-provide, saves them as Parquet, loads them into DuckDB or Postgres, and builds a small
-star schema with dbt: facts for transfers and fees, dimensions for wallets, tokens,
-contracts and dates. All chains share the same tables, so one warehouse can hold
+[Website](https://bitprimitive.com/projects/chainstar) ·
+[Live demo](https://bitprimitive.com/projects/chainstar/demo) ·
+[Source](https://github.com/Bit-Primitive/chainstar)
+
+chainstar reads blocks, transactions and token transfers from Ethereum, Base, Bitcoin and
+Solana, and turns them into tidy tables you can open in a spreadsheet or query with SQL.
+It runs on your own computer: nothing is sent anywhere except requests to the blockchain
+node, and it needs no account or sign-up.
+
+## Start here: your first data in 2 minutes
+
+You need a terminal (Terminal on macOS, PowerShell on Windows) and one of two things:
+**Docker** (easiest, works for every chain) or **uv** (no Docker; Ethereum and Base then
+also need a tool called cryo).
+
+**With Docker.** Install [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+and start it. Make an empty folder, open a terminal in it, and run:
+
+```sh
+docker run --rm -it -v "$PWD:/work" ghcr.io/bit-primitive/chainstar quickstart
+```
+
+On Windows PowerShell write `"${PWD}:/work"` instead of `"$PWD:/work"`. On Linux add
+`--user "$(id -u):$(id -g)"` after `--rm` so the files belong to you.
+
+**With uv.** Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
+```sh
+uv tool install git+https://github.com/Bit-Primitive/chainstar
+chainstar quickstart
+```
+
+(Once chainstar is on PyPI this becomes `uv tool install chainstar`.) Bitcoin and Solana
+work straight away. Ethereum and Base also need cryo; if it is missing, quickstart says
+how to get it, or use the Docker command above, which includes it.
+
+**What quickstart does.** It asks which chain and how many of the latest blocks
+(default: 20, or the single latest Bitcoin block), fetches them from a free public
+endpoint, builds the tables in a file called `warehouse.duckdb` in your folder, and
+prints what to do next. It takes about a minute on Solana and Bitcoin and a few minutes
+on Ethereum and Base (most of it reading token names). To run it without questions, add
+`--chain base --yes`.
+
+**Open it in a spreadsheet.** Save the transfers as an Excel file and double-click it:
+
+```sh
+chainstar export transfers --output transfers.xlsx
+```
+
+(with Docker: `docker run --rm -v "$PWD:/work" ghcr.io/bit-primitive/chainstar export transfers --output transfers.xlsx`)
+
+Each row is one transfer: when, which token (`token_symbol`), from whom, to whom, and how
+much (`amount`). `amount_raw` is the exact amount in the token's smallest unit. Prefer
+`.xlsx` over `.csv` for spreadsheets: a spreadsheet opening a CSV rounds long numbers
+like `amount_raw`.
+
+**Your own wallet's history.** All token transfers to or from one address, as a
+spreadsheet:
+
+```sh
+chainstar wallet 0xYourAddress --chain base --recent 1000
+```
+
+That writes `base-0xyouraddress.xlsx`. On Ethereum and Base the node filters by address,
+so this is quick; see [Wallet history](#wallet-history) for what it costs on each chain.
+
+**Good to know.** The free public endpoints are shared by everyone and rate limited, so
+chainstar asks them slowly (see [Public endpoints](#public-endpoints)). They are fine for
+trying things out and for a few thousand blocks; for more, get an RPC URL from a provider
+and pass it with `--rpc-url` or the `CHAINSTAR_RPC_URL` environment variable. If
+something goes wrong, chainstar says what happened and what to try, in one or two lines.
+
+The rest of this page is the full reference.
+
+## How it works
+
+chainstar pulls blocks, transactions and token transfers from an RPC endpoint (yours, or
+a free public one), saves them as Parquet, loads them into DuckDB or Postgres, and builds
+a small star schema with dbt: facts for transfers and fees, dimensions for wallets,
+tokens, contracts and dates. All chains share the same tables, so one warehouse can hold
 Ethereum, Base, Bitcoin and Solana side by side.
 
 ```
@@ -30,50 +106,74 @@ This is an early release (0.1, unreleased). It supports **Ethereum**, **Base**,
 
 ## Install
 
-chainstar needs Python 3.11 or newer. For Ethereum and Base it also needs the `cryo`
-command-line tool; Bitcoin and Solana need nothing else.
+There are three ways; pick one.
 
-1. For Ethereum and Base, install cryo (it is written in Rust; get Rust from
-   https://rustup.rs first):
-
-   ```sh
-   cargo install cryo_cli
-   ```
-
-   This installs cryo 0.3.2 from crates.io, the version chainstar is tested with.
-
-2. Install chainstar:
-
-   ```sh
-   pipx install chainstar     # or: pip install chainstar
-   ```
-
-   chainstar is not on PyPI yet. Until it is, install from a checkout:
-
-   ```sh
-   git clone https://github.com/Bit-Primitive/chainstar
-   pipx install ./chainstar
-   ```
-
-## Quickstart
+**Docker image** (no Python or Rust needed, cryo included). Published to the GitHub
+Container Registry by this repository's `Docker image` workflow, for amd64 and arm64
+(Apple silicon and other 64-bit ARM machines):
 
 ```sh
-export CHAINSTAR_RPC_URL="https://your-ethereum-rpc.example"   # bring your own
+docker run --rm -v "$PWD:/work" ghcr.io/bit-primitive/chainstar --help
+```
+
+`ghcr.io/bit-primitive/chainstar:latest` follows `main`; version tags such as `:0.1.0`
+follow releases. To build the image yourself: `docker build -t chainstar .` in a
+checkout (the cryo compile takes about 5 minutes).
+
+How the container sees your files: the folder you mount at `/work` is chainstar's
+working folder, so `warehouse.duckdb`, `data/` and exports appear in it, and paths you
+pass (`--output mine.xlsx`, `--target duckdb:my.duckdb`) are relative to it. Pass your
+own RPC URL with `-e CHAINSTAR_RPC_URL` (it is read from your environment, not written
+into the command). Add `-it` for quickstart's questions; without a terminal it uses the
+defaults, as with `--yes`. The image runs as an unprivileged user (uid 1000); on Linux,
+`--user "$(id -u):$(id -g)"` makes the files yours. DuckDB's `postgres` and `excel`
+extensions are included, so exports and Postgres targets work without downloads.
+
+**uv or pipx** (Python 3.11 or newer):
+
+```sh
+uv tool install git+https://github.com/Bit-Primitive/chainstar
+# or: pipx install git+https://github.com/Bit-Primitive/chainstar
+```
+
+chainstar is not on PyPI yet; once it is, `uv tool install chainstar` or
+`pipx install chainstar`.
+
+**cryo**, for Ethereum and Base outside Docker. It is written in Rust; get Rust from
+https://rustup.rs, then:
+
+```sh
+cargo install cryo_cli
+```
+
+This installs cryo 0.3.2 from crates.io, the version chainstar is tested with. Bitcoin
+and Solana need nothing else.
+
+## Using chainstar
+
+```sh
+chainstar quickstart --chain ethereum --yes            # the latest 20 blocks
+chainstar run --chain ethereum --blocks 20000000:20000100
+```
+
+`run` writes Parquet files to `./data/ethereum/` and the tables to `./warehouse.duckdb`.
+Without `--rpc-url` or `CHAINSTAR_RPC_URL` both use the chain's free public endpoint;
+with your own:
+
+```sh
+export CHAINSTAR_RPC_URL="https://your-ethereum-rpc.example"
 chainstar doctor --chain ethereum
 chainstar run --chain ethereum --blocks 20000000:20000100
 ```
 
-That writes Parquet files to `./data/ethereum/` and the tables to `./warehouse.duckdb`.
-Bitcoin and Solana work the same way, with an RPC endpoint for that chain:
+Bitcoin and Solana work the same way:
 
 ```sh
-CHAINSTAR_RPC_URL="https://your-bitcoin-node.example" \
-  chainstar run --chain bitcoin --blocks 972460:972463
-CHAINSTAR_RPC_URL="https://your-solana-rpc.example" \
-  chainstar run --chain solana --blocks 459564290:459564310   # slots, see below
+chainstar run --chain bitcoin --blocks 972460:972463
+chainstar run --chain solana --blocks 459564290:459564310   # slots, see below
 ```
 
-Query the tables with DuckDB:
+Query the tables with the [DuckDB command-line tool](https://duckdb.org/docs/installation/):
 
 ```sh
 duckdb warehouse.duckdb "
@@ -83,13 +183,19 @@ duckdb warehouse.duckdb "
   group by 1, 2 order by 3 desc limit 10"
 ```
 
+Every command has `--help` with examples. Add `--debug` before the command
+(`chainstar --debug run ...`) to see the full traceback when something fails.
+
 ### Commands
 
 | Command | What it does |
 | --- | --- |
+| `chainstar quickstart` | Guided first run: asks for a chain and how many of the latest blocks, reads the range from the chain head, runs everything, and prints next steps. `--yes` for scripts. |
+| `chainstar run` | Runs extract, decode, load and model for a block range, then prints row counts. |
+| `chainstar export` | Saves a table, or the `transfers` view with token symbols, as CSV, Excel or Parquet, with optional filters. |
+| `chainstar wallet` | All token transfers sent or received by one address in a range, as a spreadsheet. |
 | `chainstar doctor` | Checks that cryo is installed (Ethereum and Base only), the RPC serves the expected chain (EVM chain id, Bitcoin network `main`, or Solana mainnet's genesis hash), the target is reachable, and dbt is installed. |
 | `chainstar init` | Writes a commented `chainstar.yml` you can edit. |
-| `chainstar run` | Runs extract, decode, load and model for a block range, then prints row counts. |
 
 `chainstar run` options:
 
@@ -97,27 +203,165 @@ duckdb warehouse.duckdb "
 | --- | --- | --- |
 | `--chain` | from `chainstar.yml` | `ethereum`, `base`, `bitcoin` or `solana` |
 | `--blocks START:END` | from `chainstar.yml` | Block range. **END is exclusive**, as in cryo: `100:200` is 100 blocks. On Solana the numbers are slots. |
-| `--rpc-url` | `$CHAINSTAR_RPC_URL` | JSON-RPC endpoint for the chain |
+| `--rpc-url` | `$CHAINSTAR_RPC_URL`, then the chain's [public endpoint](#public-endpoints) | JSON-RPC endpoint for the chain |
 | `--target` | `$CHAINSTAR_TARGET`, then `chainstar.yml`, then `duckdb:warehouse.duckdb` | `duckdb:PATH` or `postgres:postgresql://USER@HOST:PORT/DBNAME` |
 | `--data-dir` | `./data` | Where Parquet files are kept |
-| `--requests-per-second` | no limit | Cap on requests sent to your RPC |
-| `--chunk-size` | `100` | Blocks (Solana: slots) per Parquet file. Lower it if your RPC often fails requests (see below). |
+| `--requests-per-second` | no limit; the public endpoint's rate when using one | Cap on requests sent to the RPC |
+| `--chunk-size` | `100`; `10` on public endpoints | Blocks (Solana: slots) per Parquet file. Lower it if your RPC often fails requests (see below). |
 | `--config` | `./chainstar.yml` | Config file, if you use one |
 
 Command-line flags override environment variables, which override `chainstar.yml`.
 
+`chainstar quickstart` options: `--chain` (default `base`), `--recent N` (default 20, or
+1 on Bitcoin), `--rpc-url`, `--target` (default `duckdb:warehouse.duckdb`), `--data-dir`
+(default `./data`) and `--yes`. On Ethereum and Base the range ends 5 blocks behind the
+head, since chainstar does not handle reorganisations; on Bitcoin it is the latest
+block, and on Solana the latest finalized slots.
+
 ### Re-running and adding ranges
 
 Runs are safe to repeat. Parquet files already written are skipped, by cryo on Ethereum
-and Base and by chainstar on Bitcoin and Solana (files hold 100 blocks each by default),
-and each load replaces a chain's raw rows with everything in its data directory. So you
+and Base and by chainstar on Bitcoin and Solana, and each load replaces a chain's raw rows
+with **everything in its data directory**, not only the range you just asked for. So you
 can:
 
 - re-run the same command after a failure; only the missing chunks are fetched again;
 - run further ranges into the same warehouse; they add up;
 - load all four chains into the same warehouse; every table has a `chain` column.
 
-dbt rebuilds the star-schema tables in full on each run.
+The extract lines count the range you asked for; the load line counts everything loaded,
+and the line under it says which blocks the warehouse now holds. When that is more than
+this run's range, chainstar says so:
+
+```
+extract  erc20_transfers  4,640 rows                            0.4s
+...
+load     chainstar_raw    4 tables, 18,844 rows                 0.1s
+         ethereum now in the warehouse: blocks 26,240,971 to 26,240,990 (20 blocks)
+         (each run loads every chunk saved in data/ethereum, so earlier runs' blocks are included)
+```
+
+To keep a range on its own, give it its own `--data-dir` and `--target`. dbt rebuilds
+the star-schema tables in full on each run.
+
+### Public endpoints
+
+When no RPC URL is set, chainstar uses these free shared endpoints and prints a one-line
+notice saying so. They are run by [PublicNode](https://www.publicnode.com/), are shared
+by everyone, and limit request rates, so chainstar asks them gently:
+
+| Chain | Endpoint | Requests per second | Blocks per chunk |
+| --- | --- | --- | --- |
+| Ethereum | `https://ethereum-rpc.publicnode.com` | 5 | 10 |
+| Base | `https://base-rpc.publicnode.com` | 5 | 10 |
+| Bitcoin | `https://bitcoin-rpc.publicnode.com` | 2 | 10 |
+| Solana | `https://solana-rpc.publicnode.com` | 5 | 10 (slots) |
+
+All four ran `chainstar quickstart` in October 2026 without a refused request: 20
+Ethereum blocks in 4.8 minutes, 20 Base blocks in 3.4 minutes (most of both reading
+names and symbols of 300 to 400 tokens, three calls each), 20 Solana slots in 26 seconds,
+and one Bitcoin block in 6 seconds. In earlier runs the Ethereum endpoint refused a few
+percent of requests at 5 per second with 100-block chunks, and none with 10-block chunks.
+`--requests-per-second` and `--chunk-size` override these, and your own `--rpc-url` or
+`CHAINSTAR_RPC_URL` replaces them (with no rate cap unless you set one). Public
+endpoints can change their limits or go away at any time; if they refuse requests,
+chainstar's hint says to wait and run the same command again, which resumes from the
+chunks already saved.
+
+### Exporting
+
+`chainstar export [TABLE]` saves a table to a file. `TABLE` is `transfers` (the default)
+or any star-schema table: `fct_transfers`, `fct_fees`, `dim_wallets`, `dim_tokens`,
+`dim_contracts`, `dim_dates`.
+
+```sh
+chainstar export                                         # transfers.csv
+chainstar export transfers --output transfers.xlsx
+chainstar export transfers --chain base --wallet 0xYourAddress --output mine.xlsx
+chainstar export transfers --token 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --limit 1000
+chainstar export fct_fees --format parquet --target postgres:postgresql://me@localhost:5432/chain
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--output`, `-o` | File to write. Default `<table>.<format>` in the current folder. |
+| `--format` | `csv`, `xlsx` or `parquet`. Default: from `--output`'s extension, else `csv`. |
+| `--chain` | Only this chain's rows. |
+| `--wallet ADDRESS` | Only rows where the address sends or receives (transfers and fees: `from_address` or `to_address`; `dim_wallets`: `address`). Ethereum and Base addresses match in any letter case. |
+| `--token ADDRESS` | Only this token: ERC-20 contract, SPL mint, or `native` for BTC and SOL. |
+| `--limit N` | At most N rows. |
+| `--target`, `--config` | Which warehouse, as for `run`. |
+
+`transfers` is `fct_transfers` joined to `dim_tokens`, ordered by chain, block and
+position: `block_timestamp`, `chain`, `block_number`, `transaction_hash`,
+`transfer_position`, `token_address`, `token_symbol`, `token_name`, `from_address`,
+`to_address`, `amount`, `amount_raw`.
+
+In every format `amount_raw` stays text, so 256-bit token amounts keep every digit, and
+`amount` is a number. Excel files are written by DuckDB's
+[`excel` extension](https://duckdb.org/docs/stable/core_extensions/excel), which DuckDB
+downloads the first time (the Docker image includes it), so chainstar needs no extra
+Python package. An Excel sheet holds at most 1,048,576 rows including the header; a
+larger export is refused before anything is written, with a suggestion to filter it or
+use CSV or Parquet, which have no limit. Excel files store numbers as floating point, so
+`block_number` and the like arrive as numbers with up to 15 significant digits, which
+covers every block number and index.
+
+On Bitcoin, `--wallet` matches outputs the address received, and outputs of transactions
+the address funded alone (see `from_address` in [fct_transfers](#fct_transfers)); a
+transaction funded by several addresses has no single sender.
+
+### Wallet history
+
+`chainstar wallet ADDRESS` builds a warehouse for one address and writes its transfers
+to a spreadsheet:
+
+```sh
+chainstar wallet 0xYourAddress --chain base --recent 1000
+chainstar wallet 0xYourAddress --chain ethereum --blocks 20000000:20010000 \
+  --rpc-url "$MY_RPC" --blocks-per-request 1000
+chainstar wallet YourSolanaAddress --chain solana --recent 100 --output mine.csv
+```
+
+Give either `--blocks START:END` or `--recent N`. The output defaults to
+`<chain>-<address>.xlsx`; the data goes to `data/wallet-<chain>-<address>/`, with its own
+`warehouse.duckdb`, so it never mixes with your main warehouse.
+
+What it costs, honestly:
+
+- **Ethereum and Base**: the node does the filtering. cryo 0.3.2 can filter ERC-20
+  `Transfer` events by sender (`--from-address`, the event's topic1) or by recipient
+  (`--to-address`, topic2); `eth_getLogs` combines topics with AND, so chainstar makes one
+  filtered pass for each direction. Only matching events are downloaded, then only the
+  blocks that contain one (for their timestamps), then the token names. Transactions,
+  and therefore `fct_fees`, are skipped. With `--blocks-per-request 1` (the default) that
+  is two requests per block: the free public endpoints refuse a filtered `eth_getLogs`
+  over more than one block without a contract address. Many paid providers accept
+  hundreds or thousands of blocks per request, which makes a long history quick; check
+  your provider's `eth_getLogs` block-range limit. Checked on 20 Base blocks: the same 8
+  transfers, byte for byte, as a full run filtered with `export --wallet`, in 18 seconds
+  instead of 202.
+- **Bitcoin and Solana**: their RPC interfaces cannot filter by address, so every block
+  in the range is downloaded in full (a Bitcoin block is about 6 MB compressed, a Solana
+  block 4 to 8 MB of JSON before compression) and the export keeps the address's rows. It costs the same as
+  `chainstar run` on that range.
+
+### When something goes wrong
+
+chainstar prints one `error:` line saying what happened and, for common problems, a
+`hint:` line saying what to try, instead of a traceback. For example:
+
+```
+error: getblockchaininfo: could not reach https://no-such-host.invalid/<redacted> (URLError)
+hint:  check your internet connection and the RPC URL; a free public endpoint may also be down for a while, so try again later or use your own RPC URL
+```
+
+Covered: cryo missing (with install and Docker instructions), RPC unreachable or rate
+limited (HTTP 429), the RPC serving another chain, a range past the chain head, Postgres
+refusing the password or not running, a DuckDB file another program has open, folders
+that cannot be written, a full disk, and DuckDB extensions that cannot be downloaded.
+Anything else is reported as a likely bug, with a pointer to `--debug` and the issue
+tracker. Ctrl-C stops cleanly; finished chunks are kept.
 
 ### Your RPC URL stays private
 
@@ -127,7 +371,8 @@ Hosted RPC URLs usually contain an API key, so chainstar:
 - passes it to cryo through an environment variable, not the command line, and sends
   it nowhere but your endpoint for Bitcoin and Solana;
 - turns off cryo's report files;
-- prints only the scheme and host, e.g. `https://eth-mainnet.g.alchemy.com/<redacted>`.
+- prints only the scheme and host, e.g. `https://eth-mainnet.g.alchemy.com/<redacted>`,
+  also in `--debug` tracebacks.
 
 chainstar sends no telemetry, and turns off dbt's anonymous usage statistics.
 
@@ -165,7 +410,9 @@ against `https://bitcoin-rpc.publicnode.com` (Bitcoin Core 29.3) and
 `https://solana-rpc.publicnode.com` (solana-core 4.3.0);
 `https://api.mainnet-beta.solana.com` answered the same identity and slot calls. Public
 endpoints are fine for trying chainstar on a few blocks; a Bitcoin block with input
-values is about 15 MB of JSON (6 MB compressed) and a Solana block about 4 to 8 MB.
+values is about 15 MB of JSON (6 MB compressed) and a Solana block about 4 to 8 MB. These
+publicnode endpoints are the defaults when no RPC URL is set (see
+[Public endpoints](#public-endpoints)).
 
 ## Targets
 
@@ -368,7 +615,9 @@ its not-null test skips that chain.
 - **Block reorganisations** are not handled. Stay a few blocks behind the chain head
   (Solana reads only finalized slots, which cannot be rolled back).
 - **Your RPC provider sets the limits.** Free public endpoints often refuse some
-  requests, cap request rates, or answer only for recent blocks. cryo fetches ERC-20
+  requests, cap request rates, or answer only for recent blocks (the default publicnode
+  endpoints are asked at 2 to 5 requests per second, see
+  [Public endpoints](#public-endpoints)). cryo fetches ERC-20
   transfers with one request per block, and one refused request fails its whole chunk.
   chainstar retries a failed extraction (Bitcoin and Solana: each failed request), making
   up to three attempts and keeping completed chunks; if a run still fails, run the same command
@@ -383,14 +632,15 @@ Not built yet, in rough order:
 - more EVM chains
 - SPL mints and burns, and Solana token names from on-chain metadata
 - BigQuery and Snowflake targets through dbt adapters
-- Homebrew formula and Docker image
+- Homebrew formula
 
 ## Development
 
 ```sh
 uv sync
-uv run pytest            # unit and end-to-end tests; no network or cryo needed
+uv run pytest            # unit and end-to-end tests; no RPC or cryo needed
 uv run ruff check . && uv run ruff format --check .
+docker build -t chainstar .   # the image; the cryo compile takes about 5 minutes
 ```
 
 The tests use small Parquet files cut from real cryo output (`tests/fixtures/`), and real
@@ -398,7 +648,40 @@ Bitcoin and Solana RPC responses sliced to a few transactions (`tests/rpc_fixtur
 from which the Bitcoin and Solana Parquet fixtures are produced by chainstar's own
 extractors. The end-to-end tests load all four chains into one warehouse. The Postgres
 end-to-end test runs only when `CHAINSTAR_TEST_POSTGRES_DSN` points at a throwaway
-database.
+database. The Excel export test downloads DuckDB's `excel` extension the first time and
+is skipped when it cannot.
+
+## Releasing
+
+Two workflows publish chainstar; neither needs a stored secret.
+
+- **Docker image** (`.github/workflows/docker.yml`): on every push to `main` and every
+  `v*` tag, builds `ghcr.io/bit-primitive/chainstar` for amd64 and arm64 on native
+  runners (`ubuntu-24.04` and `ubuntu-24.04-arm`) and pushes it with the workflow's own
+  `GITHUB_TOKEN` (`packages: write`). Tags: `latest` and `main` from `main`; `X.Y.Z` and
+  `X.Y` from a `vX.Y.Z` tag. One-time step after the first run: GitHub creates new
+  container packages as private, so open the package's settings
+  (github.com/orgs/Bit-Primitive/packages, then `chainstar`, then Package settings,
+  Danger Zone, Change visibility) and make it public, so `docker run` works without
+  logging in. GitHub notes this cannot be undone.
+- **PyPI** (`.github/workflows/release.yml`): on a `v*` tag, checks that the tag matches
+  the version in `pyproject.toml`, builds the sdist and wheel with `uv build`, and
+  publishes them with [trusted publishing](https://docs.pypi.org/trusted-publishers/)
+  (`pypa/gh-action-pypi-publish`, `id-token: write`): no API token is stored anywhere.
+
+One-time PyPI setup, before the first release:
+
+1. On pypi.org, sign in to the account that should own the project, open
+   *Your account → Publishing*, and add a **pending publisher** for GitHub Actions:
+   PyPI project name `chainstar`, owner `Bit-Primitive`, repository `chainstar`, workflow
+   `release.yml`, environment `pypi`. A pending publisher does not reserve the name; the
+   first successful release does (the name was free in October 2026).
+2. In the GitHub repository, *Settings → Environments → New environment*, named `pypi`.
+   Optionally add yourself as a required reviewer, so each release waits for approval.
+
+To release: set `version` in `pyproject.toml` (for example `0.1.0`), move the
+`Unreleased` notes in `CHANGELOG.md` under that version, commit, then
+`git tag v0.1.0 && git push origin v0.1.0`.
 
 ## Licence
 

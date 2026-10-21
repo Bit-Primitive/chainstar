@@ -23,6 +23,7 @@ RETRY_DELAY_SECONDS = 3.0
 TIMEOUT_SECONDS = 60.0
 # Read-only by design: only finalized Solana data, which cannot be rolled back.
 SOLANA_COMMITMENT = "finalized"
+RATE_LIMITED = 429
 
 
 class RpcError(RuntimeError):
@@ -86,6 +87,13 @@ class RpcClient:
                 if response.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
             payload = json.loads(raw, parse_float=Decimal if exact_floats else float)
+        except urllib.error.HTTPError as error:
+            # Before URLError, its parent: the status says whether we were rate limited
+            # (429) or refused, which the user can act on.
+            raise RpcError(
+                f"{method}: {redact_url(self.url)} answered HTTP {error.code}"
+                + (" (too many requests: rate limited)" if error.code == RATE_LIMITED else "")
+            ) from None
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
             # The exception text can echo the full URL, so report only the redacted form.
             raise RpcError(

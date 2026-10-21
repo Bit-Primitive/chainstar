@@ -12,27 +12,47 @@ license-files = ["LICENSE"]
 authors = [{ name = "Bit Primitive" }]
 requires-python = ">=3.11"
 keywords = [
+    "blockchain",
+    "onchain",
+    "on-chain data",
+    "web3",
+    "crypto",
     "ethereum",
     "base",
     "bitcoin",
     "solana",
-    "blockchain",
+    "erc20",
+    "token transfers",
+    "wallet history",
+    "etl",
+    "data engineering",
+    "data warehouse",
+    "star schema",
     "dbt",
     "duckdb",
     "postgres",
+    "parquet",
+    "csv",
+    "excel",
     "cryo",
-    "star-schema",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
     "Operating System :: POSIX",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: SQL",
     "Topic :: Database",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "typer>=0.12",
@@ -44,8 +64,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Bit-Primitive/chainstar"
+Homepage = "https://bitprimitive.com/projects/chainstar"
+Documentation = "https://github.com/Bit-Primitive/chainstar#readme"
+Source = "https://github.com/Bit-Primitive/chainstar"
 Issues = "https://github.com/Bit-Primitive/chainstar/issues"
+Changelog = "https://github.com/Bit-Primitive/chainstar/blob/main/CHANGELOG.md"
+"Live demo" = "https://bitprimitive.com/projects/chainstar/demo"
 
 [project.scripts]
 chainstar = "chainstar.cli:app"

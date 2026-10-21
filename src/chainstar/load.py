@@ -12,6 +12,7 @@ EVM rows are told apart by chain id; Bitcoin and Solana rows, which have none,
 by chain name.
 """
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,10 +21,19 @@ from pathlib import Path
 import duckdb
 
 from chainstar.chains import Chain
-from chainstar.datasets import ALL_DATASETS, Dataset, datasets_for, parquet_files
+from chainstar.datasets import (
+    ALL_DATASETS,
+    Dataset,
+    coverage_dataset,
+    datasets_for,
+    parquet_files,
+)
 from chainstar.targets import DuckDBTarget, PostgresTarget, Target
 
 RAW_SCHEMA = "chainstar_raw"
+# cryo's chunk file names end in <first>_to_<last>.parquet, both ends inclusive,
+# after an optional label: base__erc20_transfers__from__52896690_to_52896699.parquet
+_CHUNK_SPAN = re.compile(r"__(\d+)_to_(\d+)\.parquet$")
 
 
 class LoadError(RuntimeError):
@@ -95,6 +105,26 @@ def load_raw(target: Target, data_dir: Path, chain: Chain) -> dict[str, int]:
             files = parquet_files(data_dir, chain.name, dataset)
             counts[dataset.name] = _load_dataset(warehouse, dataset, files, chain)
     return counts
+
+
+def held_ranges(data_dir: Path, chain: Chain) -> list[tuple[int, int]]:
+    """The blocks (Solana: slots) a load puts in the warehouse, as merged inclusive spans.
+
+    A load takes every chunk on disk for the chain, not only the range just
+    extracted, so earlier runs' blocks are included; this says which those are.
+    """
+    spans = sorted(
+        (int(match[1]), int(match[2]))
+        for path in parquet_files(data_dir, chain.name, coverage_dataset(chain))
+        if (match := _CHUNK_SPAN.search(path.name))
+    )
+    merged: list[tuple[int, int]] = []
+    for first, last in spans:
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return merged
 
 
 def _create_table(warehouse: Warehouse, dataset: Dataset) -> None:

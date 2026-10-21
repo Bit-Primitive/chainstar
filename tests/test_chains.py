@@ -30,3 +30,10 @@ def test_get_chain_is_case_insensitive():
 def test_unknown_chain_lists_supported():
     with pytest.raises(UnknownChainError, match="ethereum, base, bitcoin, solana"):
         get_chain("dogecoin")
+
+
+def test_every_chain_has_a_public_endpoint():
+    from chainstar.public_rpc import PUBLIC_ENDPOINTS
+
+    assert set(PUBLIC_ENDPOINTS) == set(SUPPORTED_CHAINS)
+    assert all(e.url.startswith("https://") for e in PUBLIC_ENDPOINTS.values())
