@@ -1,0 +1,25 @@
+name: chainstar
+version: "0.1.0"
+config-version: 2
+profile: chainstar
+require-dbt-version: [">=1.10.0", "<2.0.0"]
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+
+flags:
+  # chainstar sends no telemetry, and neither should dbt on its behalf.
+  send_anonymous_usage_stats: false
+
+models:
+  chainstar:
+    staging:
+      +schema: staging
+      +materialized: view
+    marts:
+      +materialized: table
+
+seeds:
+  chainstar:
+    +schema: staging

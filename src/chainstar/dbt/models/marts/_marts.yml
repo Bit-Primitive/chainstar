@@ -1,0 +1,197 @@
+models:
+  - name: fct_transfers
+    description: One row per ERC-20 Transfer event in the loaded block ranges.
+    columns:
+      - name: transfer_id
+        description: "chain:transaction_hash:log_index"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["ethereum", "base"]
+      - name: block_number
+        data_tests: [not_null]
+      - name: block_timestamp
+        description: Block time, UTC.
+        data_tests: [not_null]
+      - name: date_day
+        description: Block date, UTC. Joins to dim_dates.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_day
+      - name: transaction_hash
+        data_tests: [not_null]
+      - name: transaction_index
+      - name: log_index
+        data_tests: [not_null]
+      - name: token_id
+        description: Joins to dim_tokens and dim_contracts.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_tokens')
+                field: token_id
+      - name: from_wallet_id
+        description: Sender. Joins to dim_wallets. The zero address means a mint.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_wallets')
+                field: wallet_id
+      - name: to_wallet_id
+        description: Recipient. Joins to dim_wallets. The zero address means a burn.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_wallets')
+                field: wallet_id
+      - name: token_address
+      - name: from_address
+      - name: to_address
+      - name: amount_raw
+        description: Exact transferred amount in the token's smallest unit, as a base-10 integer string.
+        data_tests: [not_null]
+      - name: amount
+        description: >
+          amount_raw divided by 10^decimals, as double precision (about 15 significant
+          digits). NULL when the token's decimals are unknown.
+
+  - name: fct_fees
+    description: >
+      One row per transaction with the execution fee its sender paid
+      (gas_used x effective gas price). Excludes Ethereum blob fees and Base's L1 data fee.
+    columns:
+      - name: fee_id
+        description: "chain:transaction_hash"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [not_null]
+      - name: block_number
+        data_tests: [not_null]
+      - name: block_timestamp
+        data_tests: [not_null]
+      - name: date_day
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_dates')
+                field: date_day
+      - name: transaction_hash
+        data_tests: [not_null]
+      - name: transaction_index
+      - name: payer_wallet_id
+        description: The transaction sender, who pays the fee. Joins to dim_wallets.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_wallets')
+                field: wallet_id
+      - name: from_address
+      - name: to_address
+        description: NULL for contract-creation transactions.
+      - name: transaction_type
+        description: "EIP-2718 type: 0 legacy, 1 access list, 2 EIP-1559, 3 blob, 4 set-code; 126 is an OP-stack deposit on Base."
+      - name: success
+      - name: gas_limit
+      - name: gas_used
+        data_tests: [not_null]
+      - name: effective_gas_price_wei
+        data_tests: [not_null]
+      - name: base_fee_per_gas_wei
+      - name: execution_fee_wei
+        description: gas_used x effective_gas_price_wei, exact.
+        data_tests: [not_null]
+      - name: native_symbol
+      - name: execution_fee_native
+        description: execution_fee_wei in whole native-token units (ETH), as double precision.
+
+  - name: dim_wallets
+    description: >
+      Every address that sent or received an ERC-20 transfer, or sent a transaction,
+      in the loaded data. Some are contracts; this release does not tell them apart.
+    columns:
+      - name: wallet_id
+        description: "chain:address"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [not_null]
+      - name: address
+        description: Lowercase 0x-prefixed hex.
+        data_tests: [not_null]
+      - name: is_zero_address
+      - name: first_seen_block
+      - name: first_seen_at
+      - name: last_seen_block
+      - name: last_seen_at
+      - name: transfers_out
+      - name: transfers_in
+      - name: transactions_sent
+
+  - name: dim_tokens
+    description: >
+      Every token contract that emitted an ERC-20 Transfer in the loaded data, with the
+      name, symbol and decimals cryo read from the contract at the chain head.
+    columns:
+      - name: token_id
+        description: "chain:token_address"
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_contracts')
+                field: contract_id
+      - name: chain
+        data_tests: [not_null]
+      - name: token_address
+        data_tests: [not_null]
+      - name: name
+        description: As returned by cryo 0.3.2, which strips spaces (e.g. "WrappedEther").
+      - name: symbol
+      - name: decimals
+      - name: metadata_block_number
+        description: Block at which name, symbol and decimals were read.
+      - name: has_metadata
+        description: False when the contract answered none of name(), symbol(), decimals().
+
+  - name: dim_contracts
+    description: >
+      Contracts chainstar can identify. In this release: only token contracts that
+      emitted ERC-20 Transfer events in the loaded data.
+    columns:
+      - name: contract_id
+        description: "chain:contract_address"
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [not_null]
+      - name: contract_address
+        data_tests: [not_null]
+      - name: contract_type
+        description: Always 'erc20' in this release.
+      - name: first_seen_block
+      - name: last_seen_block
+      - name: transfer_events
+
+  - name: dim_dates
+    description: One row per UTC calendar day from the earliest to the latest loaded block.
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]
+      - name: year
+      - name: quarter
+      - name: month
+      - name: day_of_month
+      - name: iso_day_of_week
+        description: 1 = Monday ... 7 = Sunday.
+      - name: iso_week
+      - name: is_weekend

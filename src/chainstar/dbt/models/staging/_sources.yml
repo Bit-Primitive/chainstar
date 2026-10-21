@@ -1,0 +1,9 @@
+sources:
+  - name: chainstar_raw
+    description: Raw tables loaded by chainstar from cryo's Parquet output. Column names follow cryo.
+    schema: chainstar_raw
+    tables:
+      - name: blocks
+      - name: transactions
+      - name: erc20_transfers
+      - name: erc20_metadata

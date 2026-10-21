@@ -1,0 +1,14 @@
+seeds:
+  - name: chains
+    description: Chains chainstar supports. Kept in step with chainstar/chains.py by a unit test.
+    config:
+      column_types:
+        chain_id: bigint
+        chain: varchar(32)
+        native_symbol: varchar(16)
+        native_decimals: integer
+    columns:
+      - name: chain_id
+        data_tests: [unique, not_null]
+      - name: chain
+        data_tests: [unique, not_null]

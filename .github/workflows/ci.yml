@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --python 3.13
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: chainstar
+          POSTGRES_PASSWORD: chainstar
+          POSTGRES_DB: chainstar_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U chainstar -d chainstar_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CHAINSTAR_TEST_POSTGRES_DSN: postgresql://chainstar:chainstar@127.0.0.1:5432/chainstar_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --python ${{ matrix.python }}
+      # Tests use Parquet fixtures, so they need neither cryo nor an RPC endpoint.
+      - run: uv run pytest -v
