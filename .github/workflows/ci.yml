@@ -63,7 +63,28 @@ jobs:
       - run: docker run -d -p 9050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=chainstar-test
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      # Every extra, so the BigQuery and Snowflake compile tests run too.
+      # Every extra, so the BigQuery and Snowflake compile tests and the dlt and Airbyte
+      # plug-in tests (dlt into DuckDB and Postgres) run too.
       - run: uv sync --python ${{ matrix.python }} --all-extras
       # Tests use Parquet fixtures, so they need neither cryo nor an RPC endpoint.
       - run: uv run pytest -v
+
+  # The Airbyte connector's image, and the commands that need no network. Its reads are
+  # tested in the test job (tests/test_airbyte_source.py), against the fixture chains.
+  airbyte-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f airbyte/source-chainstar/Dockerfile -t source-chainstar:ci .
+      - name: spec
+        run: docker run --rm source-chainstar:ci spec | grep '"type":"SPEC"'
+      - name: discover
+        run: |
+          docker run --rm -v "$PWD/airbyte/source-chainstar/integration_tests:/tests:ro" \
+            source-chainstar:ci discover --config /tests/sample_config.json \
+            | grep '"type":"CATALOG"'
+      - name: check refuses an invalid config
+        run: |
+          docker run --rm -v "$PWD/airbyte/source-chainstar/integration_tests:/tests:ro" \
+            source-chainstar:ci check --config /tests/invalid_config.json \
+            | grep '"status":"FAILED"'

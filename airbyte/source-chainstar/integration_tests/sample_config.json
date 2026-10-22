@@ -1,0 +1,5 @@
+{
+  "chains": ["bitcoin"],
+  "working_directory": "/tmp/chainstar-acceptance",
+  "from_recent": 1
+}

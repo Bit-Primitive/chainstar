@@ -1,0 +1,5 @@
+{
+  "chains": ["bitcoin", "solana"],
+  "working_directory": "/tmp/chainstar-acceptance-invalid",
+  "from_block": 972460
+}

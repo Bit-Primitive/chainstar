@@ -1,0 +1,1398 @@
+{
+  "streams": [
+    {
+      "stream": {
+        "name": "fct_transfers",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "transfer_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "block_timestamp": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "date_day": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date"
+            },
+            "transaction_hash": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "transaction_index": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "transfer_position": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "log_index": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "token_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "from_wallet_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "to_wallet_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "from_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "to_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "input_address_count": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "from_token_account": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "to_token_account": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "script_type": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "amount_raw": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "amount": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "amount_usd": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "usd_price": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_method": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_confidence": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_bucket_start": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "transfer_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "transfer_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "fct_fees",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "fee_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "block_timestamp": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "date_day": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date"
+            },
+            "transaction_hash": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "transaction_index": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "payer_wallet_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "from_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "to_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "transaction_type": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "success": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "is_vote": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "gas_limit": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "gas_used": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "effective_gas_price_wei": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "base_fee_per_gas_wei": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "execution_fee_wei": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "fee_raw": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "native_symbol": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "fee_native": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "execution_fee_native": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "fee_usd": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "native_usd_price": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_method": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_confidence": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_bucket_start": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "fee_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "fee_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "fct_swaps",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "swap_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "block_timestamp": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "date_day": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date"
+            },
+            "transaction_hash": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "transaction_index": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "swap_position": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "log_index": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "venue": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "swap_method": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "pool_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "pool_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "pool_verified": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "trader": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "sender": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "recipient": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_in_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_out_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_in_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_out_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "amount_in_raw": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "amount_out_raw": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "amount_in": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "amount_out": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "usd_value": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "usd_value_side": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_method": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_confidence": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "price_bucket_start": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "swap_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "swap_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "fct_token_prices",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "price_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "granularity": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "bucket_start": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "date_day": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date"
+            },
+            "bucket_start_unix": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "usd_price": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "observed_price": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_low": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_high": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "price_method": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "confidence": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "observations": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "rejected_observations": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "volume_usd": {
+              "type": [
+                "null",
+                "number"
+              ]
+            },
+            "sources": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "last_block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "price_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "price_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "dim_wallets",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "wallet_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "is_zero_address": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "first_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "first_seen_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "last_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "last_seen_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_without_timezone"
+            },
+            "transfers_out": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "transfers_in": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "transactions_sent": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "wallet_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "wallet_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "dim_tokens",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "token_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token_standard": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "name": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "symbol": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "decimals": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "metadata_block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "has_metadata": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "first_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "last_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "token_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "token_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "dim_contracts",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "contract_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "contract_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "contract_type": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "first_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "last_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "transfer_events": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "contract_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "contract_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "dim_pools",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "pool_id": {
+              "type": "string"
+            },
+            "chain": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "pool_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "venue": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "event_family": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "factory_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "factory_confirms": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "is_verified": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "token0_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token1_address": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token0_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "token1_id": {
+              "type": [
+                "null",
+                "string"
+              ]
+            },
+            "fee": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "tick_spacing": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "is_stable": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "metadata_block_number": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "first_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "last_seen_block": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "swap_events": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "pool_id"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "pool_id"
+        ]
+      ]
+    },
+    {
+      "stream": {
+        "name": "dim_dates",
+        "json_schema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "date_day": {
+              "type": "string",
+              "format": "date"
+            },
+            "year": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "quarter": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "month": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "day_of_month": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "iso_day_of_week": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "iso_week": {
+              "type": [
+                "null",
+                "integer"
+              ]
+            },
+            "is_weekend": {
+              "type": [
+                "null",
+                "boolean"
+              ]
+            },
+            "_chainstar_generation": {
+              "type": "integer"
+            },
+            "_chainstar_deleted": {
+              "type": "boolean"
+            },
+            "_ab_cdc_deleted_at": {
+              "type": [
+                "null",
+                "string"
+              ],
+              "format": "date-time",
+              "airbyte_type": "timestamp_with_timezone"
+            }
+          }
+        },
+        "supported_sync_modes": [
+          "full_refresh",
+          "incremental"
+        ],
+        "source_defined_cursor": true,
+        "default_cursor_field": [
+          "_chainstar_generation"
+        ],
+        "source_defined_primary_key": [
+          [
+            "date_day"
+          ]
+        ],
+        "is_resumable": true
+      },
+      "sync_mode": "incremental",
+      "destination_sync_mode": "append_dedup",
+      "cursor_field": [
+        "_chainstar_generation"
+      ],
+      "primary_key": [
+        [
+          "date_day"
+        ]
+      ]
+    }
+  ]
+}

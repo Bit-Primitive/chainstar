@@ -76,6 +76,10 @@ clickhouse = ["dbt-clickhouse>=1.10,<2", "clickhouse-connect>=0.10"]
 bigquery = ["dbt-bigquery>=1.10,<2"]
 # pyarrow: Snowflake's connector returns query results to export as Arrow tables.
 snowflake = ["dbt-snowflake>=1.10,<2", "pyarrow>=14"]
+# Plug-ins for the tools data teams already run (see the README's "Using chainstar
+# from dlt and Airbyte"). pyarrow: the dlt source hands dlt Arrow tables.
+dlt = ["dlt>=1.31,<2", "pyarrow>=14"]
+airbyte = ["airbyte-cdk>=7.38,<8"]
 all = ["chainstar[clickhouse,bigquery,snowflake]"]
 
 [project.urls]
@@ -90,7 +94,8 @@ Changelog = "https://github.com/Bit-Primitive/chainstar/blob/main/CHANGELOG.md"
 chainstar = "chainstar.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+# dlt's DuckDB and Postgres destinations, for the dlt source's end-to-end tests.
+dev = ["pytest>=8", "ruff>=0.6", "dlt[duckdb,postgres]>=1.31,<2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/chainstar"]

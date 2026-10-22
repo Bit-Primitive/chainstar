@@ -1,0 +1,9 @@
+[
+  {
+    "type": "STREAM",
+    "stream": {
+      "stream_descriptor": {"name": "fct_transfers"},
+      "stream_state": {"_chainstar_generation": 1}
+    }
+  }
+]

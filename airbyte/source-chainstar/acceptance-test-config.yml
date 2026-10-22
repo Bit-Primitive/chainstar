@@ -1,0 +1,36 @@
+# For Airbyte's CDK-native standard tests (`airbyte-cdk connector test`), which
+# replaced the connector acceptance tests. The configs use Bitcoin's free public
+# endpoint: one block (about 6 MB), then nothing new for about 10 minutes, so the
+# repeated reads cost almost nothing.
+connector_image: ghcr.io/bit-primitive/source-chainstar:dev
+acceptance_tests:
+  connection:
+    tests:
+      - config_path: integration_tests/sample_config.json
+        status: succeed
+      - config_path: integration_tests/invalid_config.json
+        status: failed
+  discovery:
+    tests:
+      - config_path: integration_tests/sample_config.json
+  basic_read:
+    tests:
+      - config_path: integration_tests/sample_config.json
+        configured_catalog_path: integration_tests/configured_catalog.json
+        empty_streams:
+          - name: fct_swaps
+            bypass_reason: Bitcoin has no DEX swaps
+          - name: dim_pools
+            bypass_reason: Bitcoin has no DEX pools
+          - name: dim_contracts
+            bypass_reason: Bitcoin has no token contracts
+  full_refresh:
+    tests:
+      - config_path: integration_tests/sample_config.json
+        configured_catalog_path: integration_tests/configured_catalog.json
+  incremental:
+    tests:
+      - config_path: integration_tests/sample_config.json
+        configured_catalog_path: integration_tests/configured_catalog.json
+        future_state:
+          future_state_path: integration_tests/sample_state.json

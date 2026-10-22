@@ -8,6 +8,46 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Added
 
+- **Plug-ins for dlt and Airbyte** (see the README's "Using chainstar from dlt and
+  Airbyte"). Both deliver the finished star schema, kept current, rather than raw
+  records. Each run syncs a working folder with chainstar's own sync (confirmations,
+  reorganisation rollbacks, incremental builds). It then compares every table, by key and
+  row hash, with what that destination was last given. New and changed rows go out as
+  upserts and vanished keys as deletes, under a per-table change number,
+  `_chainstar_generation`. The cursor lives in the framework's state and moves only with a
+  committed load, so a destination's tables equal chainstar's after every run, including
+  after a reorganisation rollback.
+  - `chainstar.integrations.dlt.chainstar_source(chains=..., from_block/from_recent=...,
+    rpc_urls=..., tables=..., confirmations=...)`, with extra `chainstar[dlt]` (dlt 1.31,
+    pyarrow).
+    - One resource per table, `write_disposition="merge"` on its primary key.
+    - Column hints for every column (exact text and `DECIMAL(38,0)` amounts), a
+      `dlt.sources.incremental` cursor on `_chainstar_generation`, and deletes through a
+      `hard_delete` column, `_chainstar_deleted`.
+    - Several pipelines can share one working folder.
+    - dlt's telemetry is turned off on import unless set.
+    - Tested with real dlt pipelines into DuckDB and Postgres: two incremental runs, a
+      run with nothing new, a simulated reorganisation, and `refresh="drop_resources"`.
+  - An Airbyte source connector on the Python CDK (`airbyte-cdk` 7.38), with extra
+    `chainstar[airbyte]`; module `chainstar.integrations.airbyte`, image and test files
+    in `airbyte/source-chainstar/`.
+    - Spec: chains, working directory, start, RPC URLs as `airbyte_secret`,
+      confirmations, tables.
+    - `check`: options, a writable folder, cryo, and each RPC's chain.
+    - `discover`: JSON schemas, primary keys, and `incremental` with a source-defined
+      cursor.
+    - `read`: incremental with per-stream `STREAM` state emitted after a stream's last
+      record, deletes as `_ab_cdc_deleted_at`, and full refresh.
+    - DECIMAL amounts are sent as strings so no destination rounds them.
+    - Docker image on `airbyte/python-connector-base:4.1.1` (pinned by digest) with cryo
+      0.3.2, `AIRBYTE_ENTRYPOINT`, running as user `airbyte`; `metadata.yaml` and
+      `acceptance-test-config.yml` for Airbyte's standard tests. Not published anywhere.
+    - Airbyte runs each sync in a fresh container, so the working folder must be on
+      storage that outlives it (self-managed Airbyte's `/local` volume); Airbyte Cloud is
+      not supported.
+  - CI runs the plug-in tests (dlt into DuckDB and Postgres, the Airbyte commands), builds
+    the connector image and runs its `spec` and `discover`.
+
 - **DEX swaps and USD prices**, from on-chain data only (no price service, nothing to
   sign up for); see the README's "Swaps and USD prices".
   - Ethereum and Base: Uniswap v2-style, Uniswap v3-style and Aerodrome `Swap` events,
@@ -90,6 +130,11 @@ All notable changes to chainstar are recorded here. The format follows
 
 ### Changed
 
+- `uv.lock` resolves pandas to 2.3.3 (was 3.0.6) and isodate to 0.6.1 (was 0.7.2):
+  `airbyte-cdk` 7.38 requires `pandas<3` and `isodate<0.7`, and a lock file holds one
+  version of each package for every extra. pandas comes only with the `bigquery` and
+  `airbyte` extras; isodate is a dependency of dbt's agate, so the Docker image gets 0.6.1
+  too. A `pip install` without the lock file is unaffected.
 - The star-schema tables have new columns (USD values) and there are three new tables:
   after upgrading, run `chainstar sync --full-refresh` once (or `chainstar run`), since
   incremental builds refuse a changed schema. `chainstar run` now also extracts swaps

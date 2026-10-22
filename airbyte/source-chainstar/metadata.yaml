@@ -1,0 +1,28 @@
+# Airbyte connector metadata, in the layout of the connectors in Airbyte's own
+# repository (e.g. source-faker). It is read by Airbyte's tooling (`airbyte-cdk
+# image build`, `airbyte-cdk connector test`); adding the image to a self-managed
+# Airbyte as a custom connector needs only the image. Not published to any
+# registry: dockerRepository is where the owner would push it.
+data:
+  connectorType: source
+  connectorSubtype: api
+  definitionId: 43ebc3fd-a43d-4fc7-a6f4-57062ff753f3
+  dockerRepository: ghcr.io/bit-primitive/source-chainstar
+  dockerImageTag: 0.1.0
+  name: chainstar
+  documentationUrl: https://github.com/Bit-Primitive/chainstar/tree/main/airbyte/source-chainstar#readme
+  githubIssueLabel: source-chainstar
+  license: Apache-2.0
+  releaseStage: alpha
+  supportLevel: community
+  connectorBuildOptions:
+    baseImage: docker.io/airbyte/python-connector-base:4.1.1@sha256:a268b44c733ae699a60f5fbc06a324945dba98945c6e2ab7f8609f2f895b0d28
+  registryOverrides:
+    cloud:
+      enabled: false
+    oss:
+      enabled: false
+  tags:
+    - language:python
+    - cdk:python
+metadataSpecVersion: "1.0"

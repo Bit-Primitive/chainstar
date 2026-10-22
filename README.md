@@ -160,6 +160,9 @@ and Snowflake need their drivers, as an extra: `clickhouse`, `bigquery`, `snowfl
 uv tool install "chainstar[clickhouse] @ git+https://github.com/Bit-Primitive/chainstar"
 ```
 
+The plug-ins for dlt and Airbyte have their own extras, `dlt` and `airbyte`, which `all`
+does not include; see [Using chainstar from dlt and Airbyte](#using-chainstar-from-dlt-and-airbyte).
+
 **cryo**, for Ethereum and Base outside Docker. It is written in Rust; get Rust from
 https://rustup.rs, then:
 
@@ -1106,6 +1109,154 @@ uploaded to each table's stage with PUT and loaded with `COPY INTO ... FILE_FORM
 (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`, each file under a new name and
 with `FORCE = TRUE`, so a repeated load is never skipped as already loaded, and inside the
 batch's transaction together with its progress, as on DuckDB and Postgres.
+
+## Using chainstar from dlt and Airbyte
+
+If your team already moves data with [dlt](https://dlthub.com) or
+[Airbyte](https://airbyte.com), chainstar plugs into them as a source. The tables they
+deliver are the finished star schema: the same tested, priced tables `chainstar sync`
+builds, not raw blocks to model yourself. That is chainstar's value: decoding, pool
+verification, on-chain USD prices, incremental builds and reorganisation handling. Raw
+records would leave all of that to you.
+
+```sh
+pip install "chainstar[dlt] @ git+https://github.com/Bit-Primitive/chainstar"       # dlt 1.31
+pip install "chainstar[airbyte] @ git+https://github.com/Bit-Primitive/chainstar"   # airbyte-cdk 7.38
+```
+
+### How it works
+
+Each run does two things:
+
+1. **Sync.** One `chainstar sync` pass into a *working folder*: Parquet chunks in
+   `data/` and a DuckDB working warehouse, `warehouse.duckdb`. Everything in
+   [Keeping a warehouse in sync](#keeping-a-warehouse-in-sync) applies: confirmations,
+   reorganisation rollbacks, incremental builds, the progress record. Keep the folder
+   between runs; it holds the progress and the token and pool metadata fetched once.
+2. **Emit what changed.** Each table is compared, by key and a hash of the whole row,
+   with what this destination was last given (kept in the working warehouse, schema
+   `chainstar_emit`, per destination). New and changed rows are emitted, and so are
+   deletes for keys that left the star schema. All of them carry a new
+   `_chainstar_generation`, the cursor.
+
+Watching only new blocks would not be enough. An incremental build also rewrites older
+rows: the newest hour's USD values, prices from the start of the UTC day, wallets and
+tokens seen again. A rollback deletes rows and rebuilds everything. Comparing rows catches
+all of it. After every run the destination's tables equal the working warehouse's, row for
+row. The comparison reads every table each run, which DuckDB does at millions of rows a
+second; on a warehouse of hundreds of millions of rows it becomes the slow part.
+
+**The cursor lives in the framework's state.** dlt keeps it in the pipeline state and
+Airbyte in its state messages, and both move it only after a load commits. A run passes
+the destination's generation in, changes are computed against that generation, and an
+uncommitted run is simply repeated. When the state is empty (a first load, or a full
+refresh), everything is emitted.
+
+**Reorganisations.** Blocks are taken only with enough confirmations (Ethereum 12, Base 60,
+Bitcoin 6, Solana finalized), so the short reorganisations every chain has never reach the
+warehouse. A deeper one is rolled back as described in
+[Reorganisations](#reorganisations). The next emission then deletes the rows that are gone
+from the destination (dlt: `_chainstar_deleted`, a `hard_delete` column; Airbyte:
+`_ab_cdc_deleted_at`) and upserts the rebuilt ones. This is tested with a simulated
+reorganisation for both.
+
+The emitted tables, keys and cursor:
+
+| Table | Primary key |
+| --- | --- |
+| `fct_transfers` | `transfer_id` |
+| `fct_fees` | `fee_id` |
+| `fct_swaps` | `swap_id` |
+| `fct_token_prices` | `price_id` |
+| `dim_wallets` | `wallet_id` |
+| `dim_tokens` | `token_id` |
+| `dim_contracts` | `contract_id` |
+| `dim_pools` | `pool_id` |
+| `dim_dates` | `date_day` |
+
+Every table has the columns of [The star schema](#the-star-schema), plus:
+- `_chainstar_generation` (bigint): the cursor, increasing per table;
+- `_chainstar_deleted` (bool): true on deletes;
+- on Airbyte, `_ab_cdc_deleted_at`.
+
+`amount_raw` and the other `*_raw` amounts stay text.
+
+### dlt
+
+```python
+import dlt
+from chainstar.integrations.dlt import chainstar_source
+
+
+def source():
+    return chainstar_source(
+        chains=["base", "solana"],
+        working_dir="chainstar-work",  # keep it between runs
+        from_recent=100,  # a chain's first sync: the latest 100 blocks
+        # rpc_urls={"base": "https://..."},  # else CHAINSTAR_RPC_URL_<CHAIN>, then public endpoints
+        # tables=["fct_transfers", "dim_tokens"],
+    )
+
+
+# DuckDB
+pipeline = dlt.pipeline("chainstar", destination="duckdb", dataset_name="chainstar")
+print(pipeline.run(source()))
+
+# Postgres (dlt reads the credentials from .dlt/secrets.toml or the environment, e.g.
+# DESTINATION__POSTGRES__CREDENTIALS=postgresql://user:password@localhost:5432/db)
+pipeline = dlt.pipeline("chainstar_pg", destination="postgres", dataset_name="chainstar")
+print(pipeline.run(source()))
+```
+
+Run the same script again, for example from cron, and only what changed is loaded. Each
+table is one dlt resource with:
+- `write_disposition="merge"` on its primary key;
+- column hints for every column, with the `DECIMAL(38,0)` wei amounts as exact decimals;
+- a `dlt.sources.incremental` cursor on `_chainstar_generation`, kept in dlt's state.
+
+Arguments:
+
+| Argument | Meaning |
+| --- | --- |
+| `chains` | `ethereum`, `base`, `bitcoin`, `solana` |
+| `working_dir` | default `chainstar-work` |
+| `from_block` / `from_recent` | a chain's first sync |
+| `rpc_urls` | per chain |
+| `tables` | which tables |
+| `confirmations` | per chain: a number or `"finalized"` |
+| `requests_per_second`, `chunk_size` | as for `chainstar sync` |
+| `sync=False` | emit from the working folder without syncing, for a folder another process keeps current, while that process is not running |
+
+dlt can also read the arguments from its own configuration, for example
+`[sources.chainstar] rpc_urls = {base = "..."}` in `.dlt/secrets.toml`.
+
+- **Full reload:** `pipeline.run(source, refresh="drop_resources")` resets the cursor and
+  reloads everything. Do not use `write_disposition="replace"` without it, since only
+  changes would be loaded.
+- **Several pipelines** can share one working folder. Each pipeline and dataset gets its
+  own record of what it was given, and the second to run finds the sync already done.
+- **Telemetry:** importing `chainstar.integrations.dlt` sets
+  `RUNTIME__DLTHUB_TELEMETRY=false` unless you set it yourself, so dlt's anonymous
+  telemetry is off.
+
+### Airbyte
+
+[`airbyte/source-chainstar/`](airbyte/source-chainstar/) holds the connector. It is
+built with Airbyte's Python CDK, packaged as a Docker image on Airbyte's
+`python-connector-base`, and comes with its tests. Every stream offers
+`Incremental | Append + Deduped`, using the primary keys above and the cursor
+`_chainstar_generation`, and `Full refresh`. Exact `DECIMAL` amounts are sent as strings,
+because Airbyte's number types lose digits in some destinations. Its README covers the
+configuration, building the image, and adding it to a self-managed Airbyte.
+
+**One caveat to know first:** Airbyte runs every sync in a fresh container, so the working
+folder must be on storage that outlives it. On self-managed Airbyte that is the optional
+`/local` volume; on Airbyte Cloud there is none, so Cloud is not supported.
+
+```sh
+docker build -f airbyte/source-chainstar/Dockerfile -t source-chainstar:dev .
+docker run --rm source-chainstar:dev spec
+```
 
 ## The star schema
 
