@@ -12,8 +12,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --python 3.13
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -61,8 +61,8 @@ jobs:
       # Not a service container: the emulator needs a --project argument, and the same
       # port on the host as inside, because it hands out upload URLs with its own port.
       - run: docker run -d -p 9050:9050 ghcr.io/goccy/bigquery-emulator:0.8.1 --project=chainstar-test
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       # Every extra, so the BigQuery and Snowflake compile tests and the dlt and Airbyte
       # plug-in tests (dlt into DuckDB and Postgres) run too.
       - run: uv sync --python ${{ matrix.python }} --all-extras
@@ -74,7 +74,7 @@ jobs:
   airbyte-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -f airbyte/source-chainstar/Dockerfile -t source-chainstar:ci .
       - name: spec
         run: docker run --rm source-chainstar:ci spec | grep '"type":"SPEC"'
