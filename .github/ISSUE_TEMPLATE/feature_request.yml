@@ -1,0 +1,16 @@
+name: Feature request
+description: Something chainstar should do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: The problem you are trying to solve, and who has it.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+      description: Optional. Commands, tables or sources you have in mind.

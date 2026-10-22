@@ -1,0 +1,29 @@
+name: Bug report
+description: Something in chainstar does not work as documented.
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The command and its output. Run it with `--debug` for the full traceback. Remove any API keys, passwords or private RPC URLs first.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `chainstar --version` (or `chainstar version`).
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and Docker or not.

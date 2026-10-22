@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://bitprimitive.com/projects/chainstar
+    about: Install, commands and reference, on bitprimitive.com.
+  - name: Report a security problem privately
+    url: https://github.com/Bit-Primitive/chainstar/security/advisories/new
+    about: Please do not report vulnerabilities in public issues.
