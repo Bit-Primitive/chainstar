@@ -17,7 +17,7 @@ RUN cargo install cryo_cli --version 0.3.2
 # extra), which keeps it under 1 GB for everyone who just wants to try chainstar. For
 # BigQuery or Snowflake build your own, which adds about 800 MB:
 #   docker build --build-arg EXTRAS="all" .     (or "bigquery", "snowflake", "")
-FROM python:3.13-slim-bookworm AS venv
+FROM python:3.15-slim-bookworm AS venv
 ARG EXTRAS="clickhouse"
 COPY --from=ghcr.io/astral-sh/uv:0.11.24 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PROJECT_ENVIRONMENT=/opt/chainstar
@@ -35,7 +35,7 @@ RUN case " $EXTRAS " in *" snowflake "*|*" all "*) ;; \
       *) uv pip install --python /opt/chainstar/bin/python --upgrade certifi ;; esac
 
 # Stage 3: the runtime image, without compilers or uv.
-FROM python:3.13-slim-bookworm
+FROM python:3.15-slim-bookworm
 LABEL org.opencontainers.image.source="https://github.com/Bit-Primitive/chainstar" \
       org.opencontainers.image.description="Raw blockchain data to clean dimensional tables, with cryo bundled." \
       org.opencontainers.image.licenses="Apache-2.0"
