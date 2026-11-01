@@ -9,7 +9,7 @@
 # Stage 1: build cryo 0.3.2 from crates.io, as the README's install step does.
 # Not --locked: the Cargo.lock shipped with the crate pins ethnum 1.5.0, which
 # no longer compiles on current Rust (E0512 in ethnum's error.rs with Rust 1.97).
-FROM rust:1.97.1-slim-bookworm AS cryo
+FROM rust:1.99.1-slim-bookworm AS cryo
 RUN cargo install cryo_cli --version 0.3.2
 
 # Stage 2: chainstar and its Python dependencies, pinned by uv.lock. The published
